@@ -16,8 +16,6 @@ spec:
     repoURL: {{ .Values.gitops.repoURL }}
     targetRevision: {{ .Values.gitops.revision }}
     path: {{ .Values.gitops.tektonPath }}/tasks
-    directory:
-      recurse: false
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ $ns }}

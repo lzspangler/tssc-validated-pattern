@@ -19,8 +19,6 @@ spec:
     repoURL: {{ .Values.gitops.repoURL }}
     targetRevision: {{ .Values.gitops.revision }}
     path: {{ .Values.gitops.tektonPath }}/pipelines
-    directory:
-      recurse: false
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ $ns }}
