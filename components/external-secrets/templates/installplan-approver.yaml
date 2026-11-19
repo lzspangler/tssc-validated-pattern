@@ -80,7 +80,7 @@ metadata:
     # through OOM during first boot, a Sync hook never ran at all on dl265
     # and the InstallPlan sat unapproved. Replace re-runs it on every sync;
     # the script is idempotent and exits once the CSV is present.
-    argocd.argoproj.io/sync-options: Replace=true
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
 spec:
   backoffLimit: 20
   template:

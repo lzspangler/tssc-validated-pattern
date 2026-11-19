@@ -123,7 +123,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
     # Recreate on every sync so a re-render re-runs the (idempotent) generator.
-    argocd.argoproj.io/sync-options: Replace=true
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
 spec:
   backoffLimit: 20
   template:
