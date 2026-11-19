@@ -48,8 +48,8 @@ data:
     # line-based sed finds nothing and the unseal key silently comes back
     # empty (that empty key is what crashlooped vault-0 on dl265).
     INIT=$(tr -d ' \n\t' < /vault/data/init.json)
-    ROOT_TOKEN=${INIT#*\\"root_token\":\"}; ROOT_TOKEN=${ROOT_TOKEN%%\"*}
-    UNSEAL_KEY=${INIT#*unseal_keys_b64\":[\"}; UNSEAL_KEY=${UNSEAL_KEY%%\"*}
+    ROOT_TOKEN=${INIT#*'"root_token":"'}; ROOT_TOKEN=${ROOT_TOKEN%%'"'*}
+    UNSEAL_KEY=${INIT#*'unseal_keys_b64":["'}; UNSEAL_KEY=${UNSEAL_KEY%%'"'*}
     [ -n "$ROOT_TOKEN" ] && [ -n "$UNSEAL_KEY" ] || {
       echo "vault: FATAL: could not extract keys from init.json"; exit 1; }
 
