@@ -459,7 +459,7 @@ data:
 
         - name: Check the committed .tekton definitions on {{ $repo.name }}
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} item.key | urlencode {{ "}}" }}?ref={{ $branch }}
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ item.key) | urlencode {{ "}}" }}?ref={{ $branch }}
             method: GET
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
@@ -473,7 +473,7 @@ data:
 
         - name: Create missing .tekton definitions
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} item.item.key | urlencode {{ "}}" }}
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ item.item.key) | urlencode {{ "}}" }}
             method: POST
             body_format: form-urlencoded
             body:
@@ -493,7 +493,7 @@ data:
 
         - name: Update stale .tekton definitions
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} item.item.key | urlencode {{ "}}" }}
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ item.item.key) | urlencode {{ "}}" }}
             method: PUT
             body_format: form-urlencoded
             body:

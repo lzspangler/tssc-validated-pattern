@@ -3,7 +3,11 @@
 {{- $quay := printf "quay.%s" $subdomain }}
 {{- if and (.Values.pac.enabled | default false) .Values.pipeline.namespace }}
 # -----------------------------------------------------------------------------
-# The .tekton/ PipelineRuns the seeding Job commits into the application
+# The .tekton/ PipelineRun definitions, as ConfigMap data keys. NOTE: keys
+# are BASE NAMES ONLY -- a ConfigMap key cannot contain "/" (the API server
+# rejects ".tekton/push-ci.yaml" outright, which is what stalled the gitlab
+# sync on dl265); the seeding playbook prefixes ".tekton/" when it commits
+# them into the repository.
 # repository's default branch. Pipelines-as-Code watches that directory via
 # the Repository CR the same Job creates, and matches runs to events by the
 # annotations below.
@@ -31,7 +35,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "2"
 apiVersion: v1
 data:
-  .tekton/push-ci.yaml: |
+  push-ci.yaml: |
     ---
     # CI on merge to main: build, publish the image to Quay, attach + upload
     # its SBOM to RHTPA, then promote the tag into the gitops repo's dev
@@ -70,7 +74,7 @@ data:
         - name: git-auth
           secret:
             secretName: scm-auth-secret
-  .tekton/pull-request-verify.yaml: |
+  pull-request-verify.yaml: |
     ---
     # MR verification: clone the MR head and run the test suite. PaC reports
     # the outcome back to the merge request as a commit status; combined with
@@ -140,7 +144,7 @@ data:
         - name: git-auth
           secret:
             secretName: scm-auth-secret
-  .tekton/generate-tests-comment.yaml: |
+  generate-tests-comment.yaml: |
     ---
     # TECH PREVIEW (PaC on-comment matching): commenting /generate-tests-unit
     # on an open merge request generates unit tests for the MR's source
