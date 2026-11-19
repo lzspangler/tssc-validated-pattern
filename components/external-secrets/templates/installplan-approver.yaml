@@ -76,8 +76,11 @@ metadata:
     {{- include "external-secrets.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
-    argocd.argoproj.io/hook: Sync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    # A plain resource (NOT an Argo hook): with the controller crashlooping
+    # through OOM during first boot, a Sync hook never ran at all on dl265
+    # and the InstallPlan sat unapproved. Replace re-runs it on every sync;
+    # the script is idempotent and exits once the CSV is present.
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 20
   template:

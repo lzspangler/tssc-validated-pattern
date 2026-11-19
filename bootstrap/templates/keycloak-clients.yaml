@@ -23,6 +23,12 @@ spec:
     path: {{ .Values.gitops.componentsPath }}/keycloak-clients
     helm:
       valuesObject:
+        global:
+          cluster:
+            # The component derives the tpa-frontend / trusted-artifact-signer
+            # redirect URIs from this; without it the render fails with
+            # "Set global.cluster.subdomain".
+            subdomain: {{ .Values.deployer.domain | quote }}
         namespace: {{ .Values.keycloak.namespace | quote }}
         {{- if $kc.keycloakUrl }}
         keycloakUrl: {{ $kc.keycloakUrl | quote }}
