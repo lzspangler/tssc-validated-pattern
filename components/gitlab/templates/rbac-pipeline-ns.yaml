@@ -23,6 +23,13 @@ rules:
   - apiGroups: ["pipelinesascode.tekton.dev"]
     resources: ["repositories"]
     verbs: ["get", "list", "create", "update", "patch"]
+  # PaC's validating admission webhook (validation.pipelinesascode.tekton.dev)
+  # requires the Repository's creator to also hold PipelineRun create rights
+  # in the target namespace -- a Repository is effectively the right to
+  # trigger runs there, and the webhook enforces that up front.
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["get", "list", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
