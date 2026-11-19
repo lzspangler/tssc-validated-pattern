@@ -13,6 +13,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "pipelines" "namespace" .Values.argocd.namespace "syncWave" $p.syncWave "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -28,8 +29,8 @@ spec:
         clusterDefaults:
           enabled: {{ $clusterDefaults }}
         ai:
-          model: {{ .Values.ai.model | quote }}
-          apiUrl: {{ .Values.ai.apiUrl | quote }}
+          model: {{ include "bootstrap.aiModel" . | quote }}
+          apiUrl: {{ include "bootstrap.aiApiUrl" . | quote }}
         tpa:
           # The RHTPA console the upload tasks authenticate against.
           url: {{ printf "https://server-trusted-profile-analyzer.%s" .Values.deployer.domain | quote }}
@@ -43,5 +44,4 @@ spec:
     server: https://kubernetes.default.svc
     namespace: {{ $p.namespace }}
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "pipelines" "namespace" .Values.argocd.namespace "syncWave" $p.syncWave "root" .) }}
 {{- end }}

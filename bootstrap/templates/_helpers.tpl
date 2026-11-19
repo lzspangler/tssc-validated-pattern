@@ -75,3 +75,20 @@ vault.address if it is not the conventional in-cluster Service.
 {{ printf "http://vault.%s.svc.cluster.local:8200" .Values.vault.namespace }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+AI backend values. The field-content deployer injects the RHDP order's
+LLM key as litemaas.* (the x2a-fsc convention); ai.* is this chart's own
+spelling. ai.* wins when both are set, litemaas.* is the fallback.
+*/}}
+{{- define "bootstrap.aiApiKey" -}}
+{{- .Values.ai.apiKey | default .Values.litemaas.apiKey | default "" -}}
+{{- end -}}
+
+{{- define "bootstrap.aiApiUrl" -}}
+{{- .Values.ai.apiUrl | default .Values.litemaas.apiUrl | default "" -}}
+{{- end -}}
+
+{{- define "bootstrap.aiModel" -}}
+{{- .Values.ai.model | default .Values.litemaas.model | default "gpt-oss-120b-a5b" -}}
+{{- end -}}

@@ -10,6 +10,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "quay" "namespace" .Values.argocd.namespace "syncWave" $q.syncWave "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -51,5 +52,4 @@ spec:
   # alone. That is load-bearing for quay-admin-token: it is the only copy of
   # a token that /api/v1/user/initialize will not reissue.
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "quay" "namespace" .Values.argocd.namespace "syncWave" $q.syncWave "root" .) }}
 {{- end }}

@@ -12,6 +12,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "tekton-config" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.config "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -40,5 +41,4 @@ spec:
         - /data/AI_BASE_URL
   {{- end }}
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "tekton-config" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.config "root" .) }}
 {{- end }}

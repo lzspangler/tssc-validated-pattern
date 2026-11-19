@@ -18,6 +18,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "artifactory" "namespace" .Values.argocd.namespace "syncWave" $af.extrasSyncWave "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -35,10 +36,10 @@ spec:
     server: https://kubernetes.default.svc
     namespace: artifactory
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "artifactory" "namespace" .Values.argocd.namespace "syncWave" $af.extrasSyncWave "root" .) }}
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "artifactory-chart" "namespace" .Values.argocd.namespace "syncWave" $af.chartSyncWave "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -106,5 +107,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
-{{- include "bootstrap.metadata" (dict "name" "artifactory-chart" "namespace" .Values.argocd.namespace "syncWave" $af.chartSyncWave "root" .) }}
 {{- end }}

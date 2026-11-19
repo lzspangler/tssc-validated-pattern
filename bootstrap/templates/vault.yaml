@@ -13,6 +13,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "vault" "namespace" .Values.argocd.namespace "syncWave" "0" "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -27,5 +28,4 @@ spec:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.vault.namespace }}
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "vault" "namespace" .Values.argocd.namespace "syncWave" "0" "root" .) }}
 {{- end }}

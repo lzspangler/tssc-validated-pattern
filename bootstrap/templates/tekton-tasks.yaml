@@ -9,6 +9,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "tekton-tasks" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.tasks "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -21,7 +22,6 @@ spec:
     server: https://kubernetes.default.svc
     namespace: {{ $ns }}
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "tekton-tasks" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.tasks "root" .) }}
 {{- if ne $ns "tssc-app-ci" }}
 {{- fail (printf "pipelineNamespace is %q, but Task RBAC manifests under pipelines/tasks/ hardcode tssc-app-ci. Edit those files to match before changing pipelineNamespace." $ns) }}
 {{- end }}

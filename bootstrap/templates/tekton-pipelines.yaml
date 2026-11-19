@@ -12,6 +12,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "tekton-pipelines" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.pipelines "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -35,5 +36,4 @@ spec:
         - '.spec.params[] | select(.name == "gitops-url" or .name == "git-host") | .default'
   {{- end }}
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "tekton-pipelines" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.pipelines "root" .) }}
 {{- end }}
