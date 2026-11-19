@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: gitlab
+  name: gitlab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitlab
+  template:
+    metadata:
+      labels:
+        app: gitlab
+    spec:
+      containers:
+      - envFrom:
+        - configMapRef:
+            name: gitlab-cm
+        - secretRef:
+            name: gitlab-secret
+        env:
+        # The root password is a Vault credential (ESO materializes
+        # tssc-gitlab-root-password); it cannot ride in gitlab-secret, which
+        # is rendered from non-secret chart values.
+        - name: GITLAB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.gitlab.rootPasswordSecret | default "tssc-gitlab-root-password" }}
+              key: password
+        image: {{ $.Values.gitlab.image }}
+        imagePullPolicy: Always
+        name: gitlab
+        ports:
+        - containerPort: 22
+          name: ssh
+          protocol: TCP
+        - containerPort: 80
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 250m
+            memory: 1Gi
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /home/git/data
+          name: gitlab-persistent-storage
+        - mountPath: /scripts
+          name: create-root-pat-vol
+      volumes:
+      - name: gitlab-persistent-storage
+        persistentVolumeClaim:
+          claimName: gitlab-persistent-storage
+      - name: create-root-pat-vol
+        configMap:
+          name: cm-create-root-pat
+          defaultMode: 0777
+      serviceAccount: gitlab
+      serviceAccountName: gitlab

@@ -1,0 +1,47 @@
+{{- if .Values.components.pipelines.enabled }}
+{{- $p := .Values.components.pipelines }}
+{{- $clusterDefaults := and .Values.components.pipelines.enabled .Values.components.tekton.enabled .Values.components.pipelines.clusterDefaults | default false }}
+# -----------------------------------------------------------------------------
+# OpenShift Pipelines operator. Pipelines-as-Code ships inside it and is the
+# CI trigger fabric for this demo: the application repo carries .tekton/
+# PipelineRuns (committed by the GitLab seeding job) and a PaC Repository CR
+# points PaC at it. There are no Tekton Triggers / EventListeners.
+#
+# The component also renders the pipeline namespace's Vault-backed Secrets
+# (tpa-secret, ai-agent-secret) and the post-sync cluster-defaults Job.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/pipelines
+    helm:
+      valuesObject:
+        deployer:
+          domain: {{ .Values.deployer.domain | quote }}
+          apiUrl: {{ .Values.deployer.apiUrl | quote }}
+        pipelineNamespace: {{ .Values.pipelineNamespace | quote }}
+        clusterDefaults:
+          enabled: {{ $clusterDefaults }}
+        ai:
+          model: {{ .Values.ai.model | quote }}
+          apiUrl: {{ .Values.ai.apiUrl | quote }}
+        tpa:
+          # The RHTPA console the upload tasks authenticate against.
+          url: {{ printf "https://server-trusted-profile-analyzer.%s" .Values.deployer.domain | quote }}
+        oidc:
+          issuerUrl: {{ include "bootstrap.issuer" . | quote }}
+        vault:
+          kvMount: {{ .Values.vault.kvMount | quote }}
+          pathPrefix: {{ .Values.vault.pathPrefix | quote }}
+          secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $p.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- include "bootstrap.metadata" (dict "name" "pipelines" "namespace" .Values.argocd.namespace "syncWave" $p.syncWave "root" .) }}
+{{- end }}

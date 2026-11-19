@@ -1,0 +1,44 @@
+{{- if .Values.components.tekton.enabled }}
+{{- $tk := .Values.components.tekton }}
+{{- $ns := .Values.pipelineNamespace }}
+{{- $clusterDefaults := and .Values.components.pipelines.enabled .Values.components.tekton.enabled .Values.components.pipelines.clusterDefaults | default false }}
+# -----------------------------------------------------------------------------
+# The AI / agent-skills ConfigMaps, synced as PLAIN YAML from
+# pipelines/config. The committed AI_MODEL/AI_BASE_URL defaults describe the
+# reference deployment; on every other cluster the cluster-defaults Job
+# rewrites them from ai.model / ai.apiUrl after the sync, and the
+# ignoreDifferences below keeps Argo's selfHeal from reverting the patch.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.tektonPath }}/config
+    directory:
+      recurse: false
+      {{- if not $tk.enableImportersJob }}
+      # Redundant once the RHTPA Application declares the importer, and it
+      # needs the tpa-secret to run at all.
+      exclude: rhtpa-enable-importers-job.yaml
+      {{- end }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  {{- if $clusterDefaults }}
+  # The tekton-cluster-defaults Job owns the cluster-specific values of these
+  # ConfigMap keys; ignoring exactly them keeps selfHeal from reverting it.
+  ignoreDifferences:
+    - group: ""
+      kind: ConfigMap
+      name: ai-agent-config
+      jsonPointers:
+        - /data/AI_MODEL
+        - /data/AI_BASE_URL
+  {{- end }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- include "bootstrap.metadata" (dict "name" "tekton-config" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.config "root" .) }}
+{{- end }}

@@ -1,0 +1,55 @@
+{{- if .Values.components.quay.enabled }}
+{{- $q := .Values.components.quay }}
+# -----------------------------------------------------------------------------
+# The registry the application images are published to. The seeding job
+# creates the quayadmin superuser (via /api/v1/user/initialize, which works
+# exactly once), the tssc organization and the pipeline robot -- reading the
+# admin password from the tssc-quay-admin Secret ESO materializes from
+# Vault. NEEDS the cluster's ODF/NooBaa for its managed object storage.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/quay
+    helm:
+      valuesObject:
+        global:
+          cluster:
+            subdomain: {{ .Values.deployer.domain | quote }}
+        quay-registry:
+          quay:
+            adminPasswordSecret: tssc-quay-admin
+            organizations:
+              - {{ $q.organization | quote }}
+            component:
+              objectstorage:
+                managed: {{ $q.objectStorageManaged }}
+            pipeline:
+              enabled: true
+              namespace: {{ .Values.pipelineNamespace | quote }}
+              organization: {{ $q.organization | quote }}
+              robotName: {{ $q.robotName | quote }}
+              secretName: {{ $q.pushSecretName | quote }}
+          noobaa:
+            enabled: {{ $q.objectStorageManaged }}
+            namespace: {{ $q.noobaaNamespace | quote }}
+          vault:
+            kvMount: {{ .Values.vault.kvMount | quote }}
+            pathPrefix: {{ .Values.vault.pathPrefix | quote }}
+            secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $q.namespace }}
+  # The three Secrets that matter here (quay-admin-token, the push Secret,
+  # the operator's generated config) are written by Ansible and by the Quay
+  # operator, not rendered from this chart, so selfHeal/prune leave them
+  # alone. That is load-bearing for quay-admin-token: it is the only copy of
+  # a token that /api/v1/user/initialize will not reissue.
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- include "bootstrap.metadata" (dict "name" "quay" "namespace" .Values.argocd.namespace "syncWave" $q.syncWave "root" .) }}
+{{- end }}

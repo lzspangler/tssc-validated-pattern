@@ -1,0 +1,97 @@
+{{- $ns := .Values.namespace }}
+# -----------------------------------------------------------------------------
+# The vault-token publisher (the x2a-fsc vault-setup pattern): a re-runnable
+# Job that waits for vault-0, reads the root token out of the pod's
+# init.json (persisted on the PVC by the entrypoint's one-time `vault
+# operator init`), and upserts it as the `vault-token` Secret in this
+# namespace -- the Secret the external-secrets ClusterSecretStore and the
+# vault-secrets generator both authenticate with.
+#
+# Uses the same agnosticd ee-multicloud image as the GitLab seeding job (oc
+# + python3), because the hashicorp/vault image ships no curl.
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-token-publish
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  publish.py: |
+    import json, subprocess, sys, time
+
+    NS = "{{ $ns }}"
+
+    def oc(*args, check=True):
+        r = subprocess.run(["oc", *args], capture_output=True, text=True)
+        if check and r.returncode != 0:
+            sys.exit("ERROR: oc %s: %s" % (" ".join(args), r.stderr.strip()))
+        return r.stdout.strip()
+
+    # Wait for vault-0 to be Running and the entrypoint to have initialized
+    # (init.json exists only after `vault operator init` completes).
+    print("waiting for vault-0 ...", flush=True)
+    for _ in range(120):
+        phase = oc("get", "pod", "vault-0", "-n", NS,
+                   "-o", "jsonpath={.status.phase}", check=False)
+        if phase == "Running":
+            raw = oc("exec", "vault-0", "-n", NS, "--",
+                     "cat", "/vault/data/init.json", check=False)
+            if raw.startswith("{"):
+                break
+        time.sleep(5)
+    else:
+        sys.exit("ERROR: vault-0 never became ready with an init.json")
+
+    root_token = json.loads(raw)["root_token"]
+
+    # Idempotent upsert: create, and patch the token when it already exists
+    # (a wiped PVC re-inits and mints a NEW root token).
+    existing = oc("get", "secret", "vault-token", "-n", NS,
+                  "-o", "jsonpath={.data.token}", check=False)
+    if existing:
+        import base64
+        if base64.b64decode(existing).decode() != root_token:
+            oc("patch", "secret", "vault-token", "-n", NS,
+               "--type", "merge",
+               "-p", json.dumps({"stringData": {"token": root_token}}))
+            print("vault-token Secret updated (root token rotated)")
+        else:
+            print("vault-token Secret already correct")
+    else:
+        oc("create", "secret", "generic", "vault-token",
+           "--from-literal=token=" + root_token, "-n", NS)
+        print("vault-token Secret created")
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-token-publish
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    # Re-run on every sync; the script is idempotent.
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: vault
+      containers:
+        - name: publish
+          image: quay.io/agnosticd/ee-multicloud:latest
+          command: ["python3", "/scripts/publish.py"]
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: vault-token-publish

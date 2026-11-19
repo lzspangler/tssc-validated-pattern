@@ -72,11 +72,11 @@ spec:
       default: "Closes"
     # ---------------- gitops repo ----------------
     # Cluster-specific: like the image-registry default in
-    # ci-build-triggers.yaml, these cannot be templated (the pipelines are
+    # the .tekton/ PaC definitions, these cannot be templated (the pipelines are
     # synced as plain YAML), so they carry this cluster's values. On gitops
     # installs the tekton-cluster-defaults Job
-    # (automation/gitops/components/pipelines) rewrites these from
-    # deployer.domain after every sync, and ssc-tekton-pipelines ignores
+    # (components/pipelines) rewrites these from
+    # deployer.domain after every sync, and tekton-pipelines Application ignores
     # exactly these fields so Argo's selfHeal keeps the patch; edit these
     # only for manual `oc apply` installs.
     - name: gitops-url

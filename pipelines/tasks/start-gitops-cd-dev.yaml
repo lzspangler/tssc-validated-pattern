@@ -119,3 +119,36 @@ spec:
         PR_NAME="$(jq -r '.metadata.name' /tmp/pipelinerun-response.json)"
         echo "Started PipelineRun ${PARAM_NAMESPACE}/${PR_NAME} (pipeline ${PARAM_PIPELINE})"
         printf '%s' "${PR_NAME}" > "$(results.PIPELINERUN.path)"
+---
+# The RBAC this task needs when it runs as a finally task of a PaC-started
+# (or manually started) PipelineRun: it POSTs the gitops-cd-dev PipelineRun
+# through the Kubernetes API as its pod's service account, which is the
+# `pipeline` SA. The old triggers file carried this under a dedicated
+# `tekton-triggers-sa`; with Pipelines as Code there is no such SA.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-pipelinerun-starter
+  namespace: tssc-app-ci
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-pipelinerun-starter
+  namespace: tssc-app-ci
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipeline-pipelinerun-starter
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: tssc-app-ci

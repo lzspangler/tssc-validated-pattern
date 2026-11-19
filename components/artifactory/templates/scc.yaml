@@ -1,0 +1,59 @@
+# Custom SCC: anyuid (any UID/GID) PLUS the RuntimeDefault seccomp profile
+# the JFrog chart requires. The pods set BOTH a fixed non-root uid
+# (StatefulSet 1030, frontend 1031, jfbus 1127, postgres 1001) AND
+# `seccompProfile: RuntimeDefault`; no stock SCC allows both (restricted-v2
+# rejects the fixed uids; anyuid rejects the seccomp profile). Granted
+# directly to the ServiceAccounts the pods run under (SCC is cluster-scoped,
+# so the grant is via .users, not a RoleBinding).
+---
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: artifactory-scc
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/description: >-
+      Like anyuid (any UID/GID) but also permits the RuntimeDefault seccomp
+      profile set by the JFrog Artifactory chart. Scoped to the Artifactory
+      ServiceAccounts.
+    argocd.argoproj.io/sync-wave: "0"
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegeEscalation: true
+allowPrivilegedContainer: false
+allowedCapabilities: null
+defaultAddCapabilities: null
+fsGroup:
+  type: RunAsAny
+priority: 10
+readOnlyRootFilesystem: false
+requiredDropCapabilities:
+  - MKNOD
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  # RunAsAny (not anyuid's MustRunAs): the bundled postgres pod sets an empty
+  # seLinuxOptions.level, which MustRunAs rejects. RunAsAny lets the node assign.
+  type: RunAsAny
+seccompProfiles:
+  - runtime/default
+supplementalGroups:
+  type: RunAsAny
+users:
+  - system:serviceaccount:{{ .Values.namespace }}:artifactory              # StatefulSet (uid 1030)
+  - system:serviceaccount:{{ .Values.namespace }}:default                  # frontend (1031) + jfbus (1127)
+  - system:serviceaccount:{{ .Values.namespace }}:artifactory-postgresql   # bundled PostgreSQL (uid 1001)
+volumes:
+  - configMap
+  - csi
+  - downwardAPI
+  - emptyDir
+  - ephemeral
+  - image
+  - persistentVolumeClaim
+  - projected
+  - secret

@@ -1,0 +1,43 @@
+{{- if .Values.components.rhtpaOperator.enabled }}
+{{- $ro := .Values.components.rhtpaOperator }}
+# -----------------------------------------------------------------------------
+# RHTPA 3.x via the operator (TrustedProfileAnalyzer, rhtpa.io/v1). The CR
+# reuses the Postgres, S3 bucket and oidc-tpa-cli Secret the prerequisites
+# component owns, and reads `storage` from here so the two cannot disagree.
+#
+# Watch for the two CR-editing traps documented in
+# components/rhtpa-operator/README.md: the CRD accepts ANY spec shape (a
+# misspelt key silently does nothing) and the chart's empty-object
+# scaffolding (migrateDatabase/createDatabase) must not be tidied away.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/rhtpa-operator
+    helm:
+      valuesObject:
+        domain: {{ .Values.deployer.domain | quote }}
+        namespace: {{ $ro.namespace | quote }}
+        createOperatorGroup: {{ $ro.createOperatorGroup }}
+        subscription:
+          channel: {{ $ro.channel | quote }}
+        trustedProfileAnalyzer:
+          routeTimeout: {{ $ro.routeTimeout | quote }}
+          storage:
+            type: {{ $ro.storage.type | quote }}
+            bucket: {{ $ro.storage.bucket | quote }}
+            regionEndpoint: {{ $ro.storage.regionEndpoint | quote }}
+          oidc:
+            # Same issuer the rest of the platform uses.
+            issuerUrl: {{ include "bootstrap.issuer" . | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ro.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- include "bootstrap.metadata" (dict "name" "rhtpa-operator" "namespace" .Values.argocd.namespace "syncWave" $ro.syncWave "root" .) }}
+{{- end }}

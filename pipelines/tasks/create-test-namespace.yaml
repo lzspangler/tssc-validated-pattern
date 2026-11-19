@@ -107,7 +107,7 @@ spec:
 #
 # NOTE: the ClusterRoleBinding subject namespace is HARDCODED to tssc-app-ci,
 # the same caveat as the RoleBinding in deploy-app-under-test.yaml and the
-# ClusterRoleBinding in triggers/agentic-issue-triggers.yaml -- plain YAML
+# ClusterRoleBinding in plain YAML
 # Applications cannot template it. Change all of them if the pipeline
 # namespace moves.
 # -----------------------------------------------------------------------------

@@ -1,0 +1,53 @@
+{{- if .Values.components.rhtas.enabled }}
+{{- $r := .Values.components.rhtas }}
+# -----------------------------------------------------------------------------
+# RHTAS / Securesign -- Fulcio, Rekor, TUF. Authenticates against the
+# cluster's existing Keycloak realm.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/rhtas
+    helm:
+      valuesObject:
+        global:
+          cluster:
+            subdomain: {{ .Values.deployer.domain | quote }}
+        trusted-artifact-signer:
+          namespace: {{ $r.namespace | quote }}
+          realm: {{ .Values.keycloak.realm | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $r.namespace }}
+  # The operator populates many spec defaults; without ignoring exactly those
+  # the Application is permanently OutOfSync on defaults alone.
+  ignoreDifferences:
+    - group: rhtas.redhat.com
+      kind: Securesign
+      name: securesign
+      namespace: {{ $r.namespace }}
+      jsonPointers:
+        - /spec/ctlog
+        - /spec/fulcio/replicas
+        - /spec/rekor/maxRequestBodySize
+        - /spec/rekor/monitoring/tlog
+        - /spec/rekor/monitoring/tuf
+        - /spec/rekor/replicas
+        - /spec/rekor/searchIndex/tls
+        - /spec/trillian/database/provider
+        - /spec/trillian/database/tls
+        - /spec/trillian/database/uri
+        - /spec/trillian/maxRecvMessageSize
+        - /spec/trillian/server
+        - /spec/trillian/signer
+        - /spec/tsa/maxRequestBodySize
+        - /spec/tsa/replicas
+        - /spec/tuf/replicas
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- include "bootstrap.metadata" (dict "name" "rhtas" "namespace" .Values.argocd.namespace "syncWave" $r.syncWave "root" .) }}
+{{- end }}

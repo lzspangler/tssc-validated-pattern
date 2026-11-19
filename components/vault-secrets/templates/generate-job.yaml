@@ -1,0 +1,156 @@
+# -----------------------------------------------------------------------------
+# The generation Job itself. Runs in the Vault namespace so it can read the
+# platform token Secret by env secretKeyRef (a pod cannot mount a Secret from
+# another namespace), talks to the Vault HTTP API directly, and needs no
+# cluster RBAC at all beyond its own token.
+#
+# Pure stdlib -- no oc, no hvac, no pip.
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-secrets-generate
+  namespace: {{ .Values.vault.namespace }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+data:
+  generate.py: |
+    import json, os, secrets as pysecrets, ssl, sys, urllib.error, urllib.request
+
+    VAULT = os.environ["VAULT_ADDR"].rstrip("/")
+    TOKEN = os.environ["VAULT_TOKEN"]
+    MOUNT = os.environ["KV_MOUNT"]
+    PREFIX = os.environ["PATH_PREFIX"]
+    AI_KEY = os.environ.get("AI_API_KEY", "").strip()
+
+    # self-signed / private-CA Vault: verify only that a cert was presented.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    def kv_read(name):
+        url = "%s/v1/%s/data/%s/%s" % (VAULT, MOUNT, PREFIX, name)
+        req = urllib.request.Request(url, headers={"X-Vault-Token": TOKEN})
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+                return json.loads(r.read())["data"]["data"]
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+        except urllib.error.URLError as e:
+            sys.exit("ERROR: cannot reach Vault at %s: %s" % (VAULT, e))
+
+    def kv_write(name, data):
+        url = "%s/v1/%s/data/%s/%s" % (VAULT, MOUNT, PREFIX, name)
+        body = json.dumps({"data": data}).encode()
+        req = urllib.request.Request(url, method="POST", data=body,
+                                     headers={"X-Vault-Token": TOKEN,
+                                              "Content-Type": "application/json"})
+        for attempt in range(10):
+            try:
+                with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+                    r.read()
+                    return
+            except urllib.error.URLError:
+                if attempt == 9:
+                    raise
+        return
+
+    def hexgen(nbytes):
+        return pysecrets.token_hex(nbytes)
+
+    # name -> (keys to generate, upsert policy)
+    #  - "generate": create the WHOLE entry only if absent
+    #  - "upsert": overwrite whenever a value is provided (AI key)
+    GENERATED = {
+        "gitlab-root-password":      {"password": lambda: hexgen(16)},
+        "quay-admin-password":       {"password": lambda: hexgen(16)},
+        "tpa-db-password":           {"password": lambda: hexgen(16)},
+        "orchestrator-db-password":  {"password": lambda: hexgen(16)},
+        "tpa-cli-client-secret":     {"client-secret": lambda: hexgen(16)},
+        "artifactory-admin-password": {"password": lambda: hexgen(12)},
+        "artifactory-keys": {
+            "master-key": lambda: hexgen(32),   # 32 bytes hex, JFrog requirement
+            "join-key":   lambda: hexgen(16),   # 16 bytes hex
+        },
+        "artifactory-postgres": {
+            "postgres-password": lambda: hexgen(16),
+            "password":          lambda: hexgen(16),
+        },
+    }
+
+    failed = False
+    for name, keys in sorted(GENERATED.items()):
+        existing = kv_read(name)
+        if existing is not None and all(existing.get(k) for k in keys):
+            print("[OK] %s: already present, left untouched" % name)
+            continue
+        if existing is not None:
+            # Partial entry (should not happen): fill only the missing keys.
+            data = {k: existing.get(k) or gen() for k, gen in keys.items()}
+        else:
+            data = {k: gen() for k, gen in keys.items()}
+        kv_write(name, data)
+        print("[CREATED] %s" % name)
+
+    # AI key: upsert when the deployer provided one; never touch otherwise.
+    if AI_KEY:
+        kv_write("ai-api-key", {"api-key": AI_KEY})
+        print("[UPSERTED] ai-api-key (deployer-supplied)")
+    else:
+        existing = kv_read("ai-api-key")
+        if existing and existing.get("api-key"):
+            print("[OK] ai-api-key: pre-loaded in Vault, left untouched")
+        else:
+            print("[WARN] ai-api-key: not in Vault and no key was injected "
+                  "(ai.apiKey empty) -- ai-agent-secret will not materialize")
+
+    if failed:
+        sys.exit(1)
+    print("Vault credential generation complete: %s/%s/*" % (MOUNT, PREFIX))
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-secrets-generate
+  namespace: {{ .Values.vault.namespace }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+    # Recreate on every sync so a re-render re-runs the (idempotent) generator.
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generate
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3", "/scripts/generate.py"]
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.vault.address | quote }}
+            - name: KV_MOUNT
+              value: {{ .Values.vault.kvMount | quote }}
+            - name: PATH_PREFIX
+              value: {{ .Values.vault.pathPrefix | quote }}
+            - name: AI_API_KEY
+              value: {{ .Values.ai.apiKey | quote }}
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vault.tokenSecretName | quote }}
+                  key: {{ .Values.vault.tokenSecretKey | quote }}
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: vault-secrets-generate

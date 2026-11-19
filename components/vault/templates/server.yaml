@@ -1,0 +1,247 @@
+{{- $ns := .Values.namespace }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+# The entrypoint: start the server, init once, unseal from the saved key,
+# ensure KV v2 at secret/, and publish the root token as the `vault-token`
+# Secret the external-secrets ClusterSecretStore and the vault-secrets
+# generator both read. Idempotent across restarts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-entrypoint
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    set -e
+    export VAULT_ADDR=http://127.0.0.1:8200
+
+    vault server -config=/vault/config/vault.hcl &
+
+    # Wait for the API to answer (unsealed or sealed, it serves /v1/sys/health).
+    i=0
+    until wget -q -O /dev/null --no-check-certificate "$VAULT_ADDR/v1/sys/health" || [ $i -ge 60 ]; do
+      i=$((i+1)); sleep 2
+    done
+
+    # Initialize exactly once; init.json survives on the PVC.
+    if [ ! -f /vault/data/init.json ]; then
+      vault operator init -key-shares=1 -key-threshold=1 -format=json > /vault/data/init.json
+      chmod 600 /vault/data/init.json
+      echo "vault: initialized"
+    fi
+
+    ROOT_TOKEN=$(sed -n 's/.*"root_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /vault/data/init.json)
+    UNSEAL_KEY=$(sed -n 's/.*"unseal_keys_b64"[[:space:]]*:[[:space:]]*\["\([^"]*\)".*/\1/p' /vault/data/init.json)
+
+    # Unseal (a no-op when already unsealed).
+    vault status 2>/dev/null || true
+    echo "$UNSEAL_KEY" | vault operator unseal - >/dev/null 2>&1 || \
+      vault operator unseal "$UNSEAL_KEY" >/dev/null
+
+    export VAULT_TOKEN="$ROOT_TOKEN"
+
+    # Ensure the KV v2 engine sits at secret/ (what the ClusterSecretStore
+    # and the vault-secrets generator expect).
+    vault secrets list 2>/dev/null | grep -q '^secret/' || \
+      vault secrets enable -path=secret -version=2 kv
+
+    # Hold the container open; the server runs as a background child.
+    wait
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  vault.hcl: |
+    ui = false
+    disable_mlock = true
+
+    storage "file" {
+      path = "/vault/data"
+    }
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = 1
+    }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-token-publisher
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["vault-token"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # The vault-token publish Job execs into vault-0 to read init.json.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-token-publisher
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vault-token-publisher
+subjects:
+  - kind: ServiceAccount
+    name: vault
+    namespace: {{ $ns }}
+---
+# anyuid: the hashicorp/vault image runs as the fixed `vault` user (uid 100)
+# and must write its own file backend; the restricted SCC's random UID cannot
+# chown the PVC. Same grant the gitlab component uses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-anyuid
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+subjects:
+  - kind: ServiceAccount
+    name: vault
+    namespace: {{ $ns }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  serviceName: vault
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault
+    spec:
+      serviceAccountName: vault
+      containers:
+        - name: vault
+          image: {{ .Values.image }}
+          command: ["/bin/sh", "/entrypoint/entrypoint.sh"]
+          ports:
+            - containerPort: 8200
+              name: api
+          env:
+            - name: VAULT_ADDR
+              value: http://127.0.0.1:8200
+            - name: HOME
+              value: /vault
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true&sealedcode=204
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /vault/data
+            - name: config
+              mountPath: /vault/config
+            - name: entrypoint
+              mountPath: /entrypoint
+      volumes:
+        - name: config
+          configMap:
+            name: vault-config
+        - name: entrypoint
+          configMap:
+            name: vault-entrypoint
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.capacity }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vault.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  selector:
+    app.kubernetes.io/name: vault
+  ports:
+    - name: api
+      port: 8200
+      targetPort: 8200
