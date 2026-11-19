@@ -104,6 +104,20 @@ platformDefaults:
   # merge-patch replaces the array, so it sends the full merged list).
   consolePlugin:
     enabled: true
+  # The Argo CD application-controller memory limit. The stock openshift-gitops
+  # instance ships 2Gi, which this app-of-apps OOM-kills during the bootstrap
+  # (verified on cluster-dl265: exit 137, Applications stuck Unknown). The
+  # platform-config Job merge-patches the Argocd CR up to this BEFORE the
+  # heavy waves (gitlab 8, quay/rhtpa 10) start -- it only ever raises, so a
+  # deliberately higher limit is left alone. The very first waves (vault,
+  # external-secrets) still run at the stock limit; they are too light to
+  # matter. Set enabled: false on a platform that manages this itself.
+  argocdController:
+    enabled: true
+    namespace: openshift-gitops
+    name: openshift-gitops
+    memoryRequest: 2Gi
+    memoryLimit: 8Gi
 
 # -----------------------------------------------------------------------------
 # Tekton cluster-defaults patch Job ("tekton-cluster-defaults").

@@ -25,6 +25,18 @@ RHDP:
 
 Cluster-side prerequisites to confirm before ordering:
 
+> **Argo CD controller memory is handled by the install**: the stock 2Gi
+> limit OOM-kills the controller during this bootstrap (verified on
+> cluster-dl265), so the `pipelines` component's platform-config Job
+> merge-patches it to 8Gi at wave 3-4, before the heavy waves. Only the
+> first, light waves (vault, external-secrets) run at the stock limit. If
+> you would rather not wait even that long, patch it by hand before
+> ordering:
+> ```sh
+> oc -n openshift-gitops patch argocd openshift-gitops --type=merge \
+>   -p '{"spec":{"controller":{"resources":{"requests":{"memory":"2Gi"},"limits":{"memory":"8Gi"}}}}}'
+> ```
+
 ```sh
 oc whoami                                                        # cluster-admin
 oc -n openshift-gitops get pods | grep application-controller     # Running
