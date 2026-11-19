@@ -28,7 +28,10 @@ operator:
 
 vault:
   server: ""
+  name: vault
   namespace: vault
+  # Port of the Vault API listener (also used by the egress NetworkPolicy).
+  port: 8200
   tokenSecretName: vault-token
   tokenSecretKey: token
   kvMount: secret

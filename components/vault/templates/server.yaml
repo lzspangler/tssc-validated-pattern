@@ -188,6 +188,9 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: vault
+        # Matched by the external-secrets component's vault-egress
+        # NetworkPolicy (the OCP ESO operator's namespace is deny-all).
+        component: server
     spec:
       serviceAccountName: vault
       containers:
