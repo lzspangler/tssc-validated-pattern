@@ -112,6 +112,40 @@ kind: ServiceAccount
 metadata:
   name: artifactory-maven-settings
   namespace: {{ $ns }}
+---
+# READ access to the admin-password Secret, in THIS namespace: the sync Job
+# reads artifactory-admin here before writing maven-settings into the
+# pipeline namespace. Without this Role the Job 403s on the read (the
+# pipeline-namespace Role below only covers maven-settings) and retries
+# forever.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: artifactory-maven-settings-read
+  namespace: {{ $ns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["artifactory-admin"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: artifactory-maven-settings-read
+  namespace: {{ $ns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: artifactory-maven-settings-read
+subjects:
+  - kind: ServiceAccount
+    name: artifactory-maven-settings
+    namespace: {{ $ns }}
   labels:
     {{- include "artifactory.labels" . | nindent 4 }}
 ---

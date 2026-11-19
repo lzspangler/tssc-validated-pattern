@@ -170,8 +170,15 @@ data:
     done
     [ "$(k8s_code "${SECRET_PATH}")" = "200" ] || die "admin secret ${CR_NAME}-initial-admin-password not found"
     # Some operator versions populate only `password` in the initial-admin
-    # secret; the platform's admin username is conventionally "admin".
-    ADMIN_USER="$(jq -r '.data.username // .data.user // "admin"' "${K8S_OUT}" | b64)"
+    # secret; the platform's admin username is conventionally "admin". NOTE:
+    # the default must NOT flow through b64() -- "admin" is not valid base64
+    # and the decoder aborts the script with "base64: invalid input".
+    _raw_user="$(jq -r '.data.username // .data.user // empty' "${K8S_OUT}")"
+    if [ -n "${_raw_user}" ]; then
+      ADMIN_USER="$(printf '%s' "${_raw_user}" | b64)"
+    else
+      ADMIN_USER="admin"
+    fi
     ADMIN_PASS="$(jq -r '.data.password // empty' "${K8S_OUT}" | b64)"
     if [ -z "${ADMIN_PASS}" ]; then
       die "admin secret is missing password (keys present: $(jq -r '.data | keys | join(", ")' "${K8S_OUT}"))"

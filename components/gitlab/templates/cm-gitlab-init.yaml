@@ -288,7 +288,14 @@ data:
             body_format: form-urlencoded
             body:
               branch: {{ $branch }}
-              content: '{{ "{{" }} r_chart_values.json.content | b64decode | regex_replace("(?m)^(\\s*repository:\\s*).*$", "\\1{{ $targetRepo }}") {{ "}}" }}'
+              # NOTE: the pattern is deliberately BACKSLASH-FREE. The
+              # double-escaped \\s / \\1 that used to be here survived
+              # Helm and YAML differently than expected inside Ansible's
+              # Jinja: the PUT fired but committed identical content (an
+              # empty commit), leaving the imported chart pointed at the
+              # authoring cluster's Quay. [[:space:]] and a literal
+              # replacement avoid the whole escaping question.
+              content: '{{ "{{" }} r_chart_values.json.content | b64decode | regex_replace("(?m)^[[:space:]]*repository:.*$", "  repository: {{ $targetRepo }}") {{ "}}" }}'
               commit_message: "Point image.repository at this cluster's Quay"
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
@@ -299,7 +306,7 @@ data:
           # no repository line at all (nothing this task should touch).
           when: >-
             r_chart_values.json.content | b64decode
-            | regex_replace("(?m)^(\\s*repository:\\s*).*$", "\\1{{ $targetRepo }}")
+            | regex_replace("(?m)^[[:space:]]*repository:.*$", "  repository: {{ $targetRepo }}")
             != r_chart_values.json.content | b64decode
 {{- end }}
 
