@@ -1,6 +1,6 @@
 # =============================================================================
 # Red Hat Automation Orchestrator -- the platform the remediation workflows
-# run on (orchestration/ at the repo root holds the workflow definitions and
+# run on (workflows/ inside this component holds the workflow definitions and
 # the design notes; everything Kubernetes lives in this chart).
 #
 # WHAT THE SETUP JOB DOES BEYOND THE INSTALL (job-setup.yaml): enables script
@@ -23,7 +23,7 @@ namespace: automation-orchestrator-operator-system
 # Name of the AutomationOrchestrator CR. Everything the operator generates
 # derives from it: the worker Deployment is <crName>-worker, the admin
 # Secret is <crName>-initial-admin-password. If you rename it, update the
-# workflow scripts' docs (orchestration/README.md names the worker SA).
+# workflow scripts' docs (workflows/README.md names the worker SA).
 crName: automationorchestrator-demo
 
 subscription:
@@ -31,7 +31,7 @@ subscription:
   name: automation-orchestrator-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  # Automatic, unlike the hand-installed original (orchestration/README.md):
+  # Automatic, unlike the hand-installed original (workflows/README.md):
   # a fresh-cluster install is unattended, and nothing is around to click
   # "approve" on an InstallPlan -- with Manual the operator never installs
   # and this Application never goes Healthy. Switch to Manual on a cluster
@@ -90,7 +90,10 @@ gitlab:
 gitops:
   repoUrl: ""
   revision: ""
-  orchestrationPath: orchestration
+  # Repo-relative path the setup Job clones for the workflow definitions.
+  # Lives INSIDE this component (Helm ignores non-template files) so the
+  # workflows travel with the chart that imports them.
+  orchestrationPath: components/orchestrator/workflows
 
 worker:
   # The platform ships script-node execution disabled (Developer Preview;

@@ -7,11 +7,11 @@ platform's backend + Temporal databases, the `AutomationOrchestrator` CR,
 the worker's Kubernetes access, and a setup Job that finishes the install in
 ways Argo alone cannot.
 
-`orchestration/` at the repo root holds the workflow definitions and the
+`workflows/` inside this component holds the workflow definitions and the
 full design notes for the worker patches and script-node constraints; this
 README covers the chart itself.
 
-## Why a chart (and not plain YAML like `orchestration/` used to have)
+## Why a chart (and not plain YAML like `orchestration/` used to have
 
 The platform's Postgres password appears in **three rendered places** — the
 postgres Deployment's `POSTGRESQL_PASSWORD` env, the init SQL's `CREATE
