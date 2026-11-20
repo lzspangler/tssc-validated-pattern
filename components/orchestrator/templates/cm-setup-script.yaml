@@ -363,19 +363,19 @@ data:
         fi
         log "Workflow exists (id ${WF_ID}); updating in place"
         if [ -n "${EXPECTED_VER}" ]; then
-          jq -n --arg n "${NAME}" --arg d "${DESC}" --slurpfile def /tmp/ao-wf.json \
+          jq -n --arg n "${NAME}" --arg d "${DESC}" --slurpfile wfdef /tmp/ao-wf.json \
              --argjson ev "${EXPECTED_VER}" \
-             '{name: $n, description: $d, workflow_definition: $def[0], expected_version: $ev}' > /tmp/ao-body.json
+             '{name: $n, description: $d, workflow_definition: $wfdef[0], expected_version: $ev}' > /tmp/ao-body.json
         else
-          jq -n --arg n "${NAME}" --arg d "${DESC}" --slurpfile def /tmp/ao-wf.json \
-             '{name: $n, description: $d, workflow_definition: $def[0]}' > /tmp/ao-body.json
+          jq -n --arg n "${NAME}" --arg d "${DESC}" --slurpfile wfdef /tmp/ao-wf.json \
+             '{name: $n, description: $d, workflow_definition: $wfdef[0]}' > /tmp/ao-body.json
         fi
         ao_call PATCH "/workflows/${WF_ID}" /tmp/ao-body.json
       else
         log "Workflow does not exist; importing"
-        jq -n --arg n "${NAME}" --arg d "${DESC}" --slurpfile def /tmp/ao-wf.json \
+        jq -n --arg n "${NAME}" --arg d "${DESC}" --slurpfile wfdef /tmp/ao-wf.json \
            --arg pid "${PLATFORM_PROJECT}" \
-           '{name: $n, description: $d, workflow_definition: $def[0],
+           '{name: $n, description: $d, workflow_definition: $wfdef[0],
              is_import: true}
             | (if $pid != "" then . + {project_id: ($pid | tonumber? // $pid)} else . end)' > /tmp/ao-body.json
         ao_call POST "/workflows" /tmp/ao-body.json
