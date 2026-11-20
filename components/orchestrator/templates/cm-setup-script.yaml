@@ -270,14 +270,29 @@ data:
     WF_DIR="/tmp/repo/${ORCHESTRATION_PATH}"
     [ -d "${WF_DIR}" ] || die "${ORCHESTRATION_PATH}/ not found in the cloned repo"
 
-    # Platform project id for the import call. Best-effort: /projects was
-    # not in the saved UI bundle, and on a fresh install a default project
-    # may or may not exist yet. Prefer the id of an already-imported
-    # workflow (stable across re-runs), then the first /projects entry.
+    # Platform project id for the import call. TWO traps, both hit live:
+    #   1. GET /projects lists the write-protected `built-in` project FIRST
+    #      (is_builtin: true) -- taking .[0] picks it, and the import dies
+    #      with 403 BUILTIN_PROTECTED ("Cannot create workflows in built-in
+    #      project"). Filter it out.
+    #   2. A fresh platform has ONLY the built-in project -- create one
+    #      (POST /projects {name, description}, verified against a live
+    #      instance) and import into that.
     PLATFORM_PROJECT=""
     ao_get "/projects"
     if [ "${AO_CODE}" = "200" ]; then
-      PLATFORM_PROJECT="$(printf '%s' "${AO_BODY}" | jq -r '((if type == "array" then . else (.resources // []) end) | .[0].id // empty)' 2>/dev/null || true)"
+      PLATFORM_PROJECT="$(printf '%s' "${AO_BODY}" | jq -r '((if type == "array" then . else (.resources // []) end) | map(select(.is_builtin != true)) | .[0].id // empty)' 2>/dev/null || true)"
+    fi
+    if [ -z "${PLATFORM_PROJECT}" ]; then
+      jq -n '{name: "tssc-validated-pattern",
+              description: "TSSC validated pattern remediation workflows (created by the setup job)"}' > /tmp/ao-project.json
+      ao_call POST "/projects" /tmp/ao-project.json
+      if [ "${AO_CODE}" = "200" ] || [ "${AO_CODE}" = "201" ]; then
+        PLATFORM_PROJECT="$(printf '%s' "${AO_BODY}" | jq -r '.id // empty')"
+        log "Created platform project tssc-validated-pattern (id ${PLATFORM_PROJECT})"
+      else
+        log "WARNING: could not create a platform project (HTTP ${AO_CODE}); the import may fail with BUILTIN_PROTECTED"
+      fi
     fi
 
     # Best-effort: create a GitLab credential so the http_request nodes in
