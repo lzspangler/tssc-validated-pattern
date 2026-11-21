@@ -295,27 +295,39 @@ data:
       fi
     fi
 
-    # Best-effort: create a GitLab credential so the http_request nodes in
-    # remediate_next_gitlab can authenticate. The POST /credentials body is
-    # NOT verified against a live instance (the credential-create modal is
-    # an unsaved UI chunk) -- any failure here only warns, and the imported
-    # workflow keeps its old credential_id (fix manually in the UI).
+    # Create the GitLab credential the http_request nodes authenticate
+    # with. VERIFIED against a live instance (2026-11-21, dl265):
+    #   * the API takes credential_type_id (a UUID), NOT credential_type
+    #     (a name) -- sending a name is a 422 "credential_type_id: Field
+    #     required"
+    #   * there is NO "gitlab" type on the platform; the list is: HTTP
+    #     Bearer Token, HTTP Basic Auth, AAP, LLM Provider, SSH Key, Secret
+    #     URL. Bearer Token fits: its schema is a single secret `token`,
+    #     injected as "Authorization: Bearer <token>" -- exactly what the
+    #     GitLab API takes.
+    #   * the credential must carry the SAME project_id as the workflows,
+    #     or the workflow import rejects it ("credential references ...
+    #     belong to a different project").
+    # On failure this dies loudly: the workflow import would otherwise fail
+    # with a confusing 422 about invalid credential references.
     NEW_CRED_ID=""
     if [ "$(k8s_code "/api/v1/namespaces/${PIPELINE_NAMESPACE}/secrets/scm-auth-secret")" = "200" ]; then
       GL_TOKEN="$(jq -r '.data.token // empty' "${K8S_OUT}" | b64)"
       if [ -n "${GL_TOKEN}" ]; then
-        CRED_TYPE="gitlab"
+        CRED_TYPE_ID=""
         ao_get "/credential_types"
         if [ "${AO_CODE}" = "200" ]; then
-          FOUND="$(printf '%s' "${AO_BODY}" | jq -r '(if type == "array" then . else (.resources // []) end)[] | select(.name | test("gitlab"; "i")) | .name' 2>/dev/null | head -1 || true)"
-          if [ -n "${FOUND}" ]; then CRED_TYPE="${FOUND}"; fi
+          CRED_TYPE_ID="$(printf '%s' "${AO_BODY}" | jq -r '(if type == "array" then . else (.resources // []) end)[] | select(.name | test("bearer"; "i")) | .id' 2>/dev/null | head -1 || true)"
         fi
-        jq -n --arg t "${CRED_TYPE}" --arg h "https://${GITLAB_HOST}" --arg tok "${GL_TOKEN}" \
+        if [ -z "${CRED_TYPE_ID}" ]; then
+          die "no HTTP Bearer Token credential type found on the platform (GET /credential_types) -- cannot create the GitLab credential the workflows need"
+        fi
+        jq -n --arg t "${CRED_TYPE_ID}" --arg tok "${GL_TOKEN}" \
            --arg pid "${PLATFORM_PROJECT}" \
            '{name: "gitlab-demo",
              description: "GitLab API token from scm-auth-secret (created by the ssc-demo setup job)",
-             credential_type: $t,
-             inputs: {host: $h, token: $tok}}
+             credential_type_id: $t,
+             inputs: {token: $tok}}
             | (if $pid != "" then . + {project_id: ($pid | tonumber? // $pid)} else . end)' > /tmp/ao-cred.json
         chmod 600 /tmp/ao-cred.json
         ao_call POST "/credentials" /tmp/ao-cred.json
@@ -324,13 +336,13 @@ data:
           NEW_CRED_ID="$(printf '%s' "${AO_BODY}" | jq -r '.id // empty' 2>/dev/null || true)"
           log "Created platform credential for GitLab (id: ${NEW_CRED_ID})"
         else
-          log "WARNING: credential creation returned HTTP ${AO_CODE}; continuing without it (http_request nodes keep their old credential_id -- see components/orchestrator/README.md)"
+          die "credential creation returned HTTP ${AO_CODE}: $(printf '%s' "${AO_BODY}" | head -c 200) -- the workflow import would fail on invalid credential references"
         fi
       else
-        log "WARNING: scm-auth-secret has no 'token' key; skipping platform credential creation"
+        die "scm-auth-secret has no 'token' key -- the workflow import would fail on invalid credential references"
       fi
     else
-      log "WARNING: scm-auth-secret not readable in ${PIPELINE_NAMESPACE} (HTTP ${AO_CODE}); skipping platform credential creation"
+      die "scm-auth-secret not readable in ${PIPELINE_NAMESPACE} (HTTP ${AO_CODE}) -- the workflow import would fail on invalid credential references"
     fi
 
     for WF in ${WORKFLOWS}; do
