@@ -329,7 +329,7 @@ spec:
 # Plus system:image-builder for pushing to the integrated registry.
 #
 # NOTE: the namespace is HARDCODED to tssc-app-ci, the same caveat as the
-# ClusterRoleBinding subject in triggers/agentic-issue-triggers.yaml -- plain
+# ClusterRoleBinding subject in plain
 # YAML Applications cannot template it. Change both if the pipeline namespace
 # moves.
 # -----------------------------------------------------------------------------

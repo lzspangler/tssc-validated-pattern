@@ -72,18 +72,25 @@ metadata:
   labels:
     app.kubernetes.io/part-of: maven-build-ci
 data:
-  # gpt-oss-120b on the Red Hat MaaS endpoint, driven by aider. Matches the
-  # `agent-image` default on the pipelines (ai-agent-maven-aider), so no
-  # PipelineRun override is needed.
+  # gpt-oss-120b-a5b on the RHDP-provided LiteMaaS gateway, driven by aider.
+  # Matches the `agent-image` default on the pipelines (ai-agent-maven-aider),
+  # so no PipelineRun override is needed.
   #
-  # The companion Secret must supply OPENAI_API_KEY and must NOT define
-  # AI_PROVIDER: the AI tasks set
+  # AI_MODEL and AI_BASE_URL are the REFERENCE deployment's values: on every
+  # cluster the tekton-cluster-defaults Job rewrites them from the
+  # bootstrap chart's ai.model / ai.apiUrl (the deployer injects the
+  # endpoint with the API key), and the tekton-config Application's
+  # ignoreDifferences keeps Argo's selfHeal from reverting the patch.
+  #
+  # The companion Secret (ai-agent-secret, materialized from Vault by ESO)
+  # must supply OPENAI_API_KEY and must NOT define AI_PROVIDER: the AI tasks
+  # set
   #   envFrom: [configMapRef: ai-agent-config, secretRef: ai-agent-secret]
   # and the LAST source wins, so an AI_PROVIDER key in the Secret silently
   # overrides whatever is set here.
   AI_PROVIDER: "openai"
   AI_AGENT: "aider"
-  AI_MODEL: "gpt-oss-120b"
+  AI_MODEL: "gpt-oss-120b-a5b"
   # The model's /v1 endpoint (AI_PROVIDER=openai or gateway).
   AI_BASE_URL: "https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
   # Effort / verbosity knob where supported (low|medium|high|xhigh|max). For

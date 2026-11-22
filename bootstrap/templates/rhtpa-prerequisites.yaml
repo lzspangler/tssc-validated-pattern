@@ -1,0 +1,37 @@
+{{- if .Values.components.rhtpaPrerequisites.enabled }}
+{{- $rp := .Values.components.rhtpaPrerequisites }}
+# -----------------------------------------------------------------------------
+# RHTPA's prerequisites: Postgres, the S3 ObjectBucketClaim (against the
+# cluster's ODF/NooBaa) and the oidc-tpa-cli Secret. The database password
+# and the tpa-cli client secret are NOT values -- ESO materializes both
+# Secrets from Vault, keeping the names and keys the RHTPA CR reuses.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" "rhtpa-prerequisites" "namespace" .Values.argocd.namespace "syncWave" $rp.syncWave "root" .) }}
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/rhtpa-prerequisites
+    helm:
+      valuesObject:
+        global:
+          cluster:
+            subdomain: {{ .Values.deployer.domain | quote }}
+        storage:
+          type: {{ .Values.components.rhtpaOperator.storage.type | quote }}
+          bucketName: {{ .Values.components.rhtpaOperator.storage.bucket | quote }}
+        oidc:
+          issuerUrl: {{ include "bootstrap.issuer" . | quote }}
+        vault:
+          kvMount: {{ .Values.vault.kvMount | quote }}
+          pathPrefix: {{ .Values.vault.pathPrefix | quote }}
+          secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $rp.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- end }}

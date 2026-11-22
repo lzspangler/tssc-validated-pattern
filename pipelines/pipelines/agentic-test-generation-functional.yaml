@@ -328,7 +328,7 @@ spec:
 
   # NOTE: the deploy/reset/cleanup/generation tasks are pinned to the `pipeline`
   # service account via `taskRunSpecs` on the PipelineRun, in
-  # triggers/agentic-issue-triggers.yaml. taskRunSpecs is a PipelineRun-only
+  # the PaC-started run. taskRunSpecs is a PipelineRun-only
   # field: no Tekton Pipeline CRD declares it, so the API server silently
   # prunes it from here (syncs "succeed" but Argo CD stays OutOfSync forever).
   workspaces:

@@ -1,0 +1,31 @@
+{{- if .Values.vault.deploy }}
+# -----------------------------------------------------------------------------
+# Vault itself, for clusters that do not ship one (cluster-dl265 and most
+# field-content clusters). Single node, file storage, self-unsealing; the
+# entrypoint publishes the root token as the `vault-token` Secret in the
+# vault namespace -- exactly what the external-secrets ClusterSecretStore
+# and the vault-secrets generator authenticate with.
+#
+# Wave 0, before external-secrets (1) and vault-secrets (2). On a cluster
+# that provides its own Vault, set vault.deploy=false and point
+# vault.address / vault.tokenSecretName at it instead.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" "vault" "namespace" .Values.argocd.namespace "syncWave" "0" "root" .) }}
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/vault
+    helm:
+      valuesObject:
+        namespace: {{ .Values.vault.namespace | quote }}
+        image: {{ .Values.vault.image | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.vault.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- end }}

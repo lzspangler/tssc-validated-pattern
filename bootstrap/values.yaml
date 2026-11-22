@@ -1,0 +1,255 @@
+# =============================================================================
+# TSSC validated pattern — RHDP field-sourced content root chart.
+#
+# The RHDP "Field Sourced Content - OpenShift" deployer creates ONE Argo CD
+# Application pointing at `bootstrap/` in this repo and injects
+# `deployer.domain`. This chart renders the child Applications, one per
+# component, each sourcing `components/<name>` from the SAME repo — the
+# x2a-fsc layout.
+#
+# WHAT THE TARGET CLUSTER ALREADY PROVIDES (do not install here):
+#   * OpenShift GitOps (openshift-gitops / Argo CD)
+#   * Keycloak           (components.keycloakClients provisions our clients
+#                          into it — set keycloak.issuerUrl if its Route is
+#                          not https://sso.<domain>)
+#   * ODF object storage (NooBaa backs Quay and RHTPA's s3 mode; no StorageCluster
+#                          is created or patched here beyond Quay's BackingStore
+#                          size fix)
+#   * Vault              (credentials are GENERATED into it by the
+#                          vault-secrets component and pulled back out by
+#                          External Secrets Operator)
+#   * an AI API key for the gpt-oss-120b-a5b model (deployer-injected via
+#                          ai.apiKey, or pre-loaded in Vault at
+#                          <vault.pathPrefix>/ai-api-key)
+#
+# NO CREDENTIALS LIVE IN THIS FILE. Everything is generated at install time
+# and stored in Vault.
+# =============================================================================
+
+gitops:
+  repoURL: https://github.com/project-lightpath/tssc-validated-pattern.git
+  revision: main
+  # Component charts live at the repo root (x2a-fsc layout).
+  componentsPath: components
+  # The Tekton Tasks and config are NOT under components/ -- they live at the
+  # repo root under pipelines/, where pipelines/README.md documents them.
+  tektonPath: pipelines
+
+argocd:
+  namespace: openshift-gitops
+  project: default
+
+# Injected by the field-content deployer: the cluster's apps subdomain
+# (e.g. apps.cluster-abcde.example.com, no leading dot). Every hostname the
+# platform publishes derives from it.
+deployer:
+  domain: ""
+  apiUrl: ""
+
+# Namespace the Tekton layer is installed into. The GitLab seeding job writes
+# the SCM tokens here, and the PaC Repository CR for the application repo is
+# created here.
+#
+# EFFECTIVELY FIXED at tssc-app-ci: several Task RBAC manifests under
+# pipelines/tasks/ hardcode it. Change them together with this value.
+pipelineNamespace: tssc-app-ci
+
+# -----------------------------------------------------------------------------
+# Vault. By default the vault component INSTALLS a single-node Vault (the
+# x2a-fsc pattern) for clusters that do not ship one. Credentials are generated into
+#   <kvMount>/<pathPrefix>/<name>
+# by the vault-secrets component and read back by External Secrets Operator
+# through the ClusterSecretStore the external-secrets component creates.
+#
+# Auth is a static token read from Secret <tokenSecretName> (key
+# <tokenSecretKey>) in <namespace> — the same convention x2a-fsc uses. If the
+# platform's Vault uses Kubernetes auth instead, replace the ClusterSecretStore
+# auth block in components/external-secrets.
+# -----------------------------------------------------------------------------
+vault:
+  # Install our own single-node Vault (the x2a-fsc pattern) when the cluster
+  # does not ship one. Set false on a cluster that provides Vault, and point
+  # address / tokenSecretName at it.
+  deploy: true
+  image: docker.io/hashicorp/vault:1.17.3
+  namespace: vault
+  # Empty derives http://vault.<namespace>.svc.cluster.local:8200
+  address: ""
+  tokenSecretName: vault-token
+  tokenSecretKey: token
+  # KV v2 mount name and the path prefix every credential lands under.
+  kvMount: secret
+  pathPrefix: tssc-validated-pattern
+  # Name of the ClusterSecretStore the external-secrets component creates;
+  # every component-rendered ExternalSecret references it.
+  secretStoreName: vault-cluster
+
+# -----------------------------------------------------------------------------
+# The cluster's EXISTING Keycloak. keycloakClients provisions only what this
+# demo needs (tpa-* roles, document scopes, tpa-cli / tpa-frontend /
+# trusted-artifact-signer clients) into <realm>; it touches nothing else.
+#
+# issuerUrl: the OIDC issuer RHTPA, RHTAS and the pipelines authenticate
+# against. Empty derives https://sso.<domain>/realms/<realm> — override if the
+# platform Keycloak is published elsewhere.
+# -----------------------------------------------------------------------------
+keycloak:
+  issuerUrl: ""
+  realm: backstage
+  # Namespace holding the admin Secret (must be the Keycloak operator's).
+  namespace: keycloak
+  adminSecretName: keycloak-initial-admin
+
+# -----------------------------------------------------------------------------
+# AI backend. The deployer injects the API key for the gpt-oss-120b-a5b model
+# from the RHDP order form (30-day expiry); it is stored in Vault by the
+# vault-secrets component and materialized as the pipeline namespace's
+# ai-agent-secret by ESO. If ai.apiKey is empty, the vault-secrets job leaves
+# the Vault entry alone — a pre-loaded key works too.
+# -----------------------------------------------------------------------------
+ai:
+  apiUrl: ""
+  apiKey: ""
+  model: gpt-oss-120b-a5b
+
+# =============================================================================
+# Components. Sync waves serialize the install; a wave only starts once the
+# previous one is Healthy.
+# =============================================================================
+components:
+
+  # External Secrets Operator + the Vault ClusterSecretStore every
+  # credential-consuming component reads through.
+  externalSecrets:
+    enabled: true
+    namespace: external-secrets-operator
+    controllerNamespace: external-secrets
+    operatorName: openshift-external-secrets-operator
+    channel: stable-v1
+    source: redhat-operators
+    # Wave 1: after the vault component (0) when vault.deploy is on.
+    syncWave: "1"
+
+  # One-shot (re-runnable) Job that GENERATES every credential the demo
+  # needs and stores it in Vault. Nothing consumes a value from this chart.
+  vaultSecrets:
+    enabled: true
+    syncWave: "2"
+
+  # OpenShift Pipelines operator. Pipelines-as-Code ships inside it — the
+  # CI triggering for this demo is PaC Repository CRs + .tekton/
+  # PipelineRuns in the application repo, NOT Tekton Triggers.
+  pipelines:
+    enabled: true
+    namespace: openshift-operators
+    syncWave: "3"
+    # Post-sync Job that rewrites the Tekton layer's cluster-specific defaults
+    # (gitops-cd-* gitops-url/git-host, ai-agent-config AI_MODEL/AI_BASE_URL)
+    # from deployer.domain / ai.* after the Tekton Applications sync.
+    clusterDefaults: true
+
+  # The Tekton layer itself: Tasks and the AI/agent-skills ConfigMaps, synced
+  # as PLAIN YAML from pipelines/ at the repo root. The Pipelines under
+  # pipelines/pipelines/ are also synced (wave 5, see tekton-pipelines below)
+  # because the PaC PipelineRuns reference them by pipelineRef.
+  tekton:
+    enabled: true
+    syncWaves:
+      tasks: "4"
+      config: "4"
+      pipelines: "5"
+    # pipelines/config/rhtpa-enable-importers-job.yaml is redundant on a
+    # GitOps install (the RHTPA Application declares the importer) and needs
+    # the hand-made tpa-secret, so it stays excluded.
+    enableImportersJob: false
+
+  # Clients in the cluster's EXISTING Keycloak (bring-your-own).
+  keycloakClients:
+    enabled: true
+    syncWave: "5"
+    # Empty derives https://sso.<domain>
+    keycloakUrl: ""
+    tlsVerify: false
+
+  # Artifactory OSS — the Maven repository every build resolves through.
+  # Two Applications: the OpenShift extras (SCC/Route/repo-bootstrap CM +
+  # Vault-backed secrets) at wave 6, then the JFrog chart itself at wave 7.
+  artifactory:
+    enabled: true
+    chartVersion: "107.161.26"
+    extrasSyncWave: "6"
+    chartSyncWave: "7"
+
+  # GitLab + the seeding job that imports the application and gitops repos,
+  # mints the project tokens, commits the .tekton/ PaC PipelineRuns into the
+  # application repo and creates its PaC Repository CR.
+  gitlab:
+    enabled: true
+    namespace: gitlab
+    syncWave: "8"
+
+  # The registry application images are published to.
+  quay:
+    enabled: true
+    namespace: quay-registry
+    syncWave: "10"
+    organization: tssc
+    robotName: remediation
+    pushSecretName: quay-push
+    objectStorageManaged: true
+    noobaaNamespace: openshift-storage
+
+  rhtas:
+    enabled: true
+    namespace: trusted-artifact-signer
+    syncWave: "10"
+
+  # Postgres + the S3 ObjectBucketClaim + the oidc-tpa-cli Secret RHTPA
+  # reuses. Passwords come from Vault via ESO.
+  rhtpaPrerequisites:
+    enabled: true
+    namespace: trusted-profile-analyzer
+    syncWave: "10"
+
+  # Red Hat Automation Orchestrator + the two remediation workflows.
+  orchestrator:
+    enabled: true
+    namespace: automation-orchestrator-operator-system
+    syncWave: "10"
+
+  # RHTPA 3.x via the operator (TrustedProfileAnalyzer CR).
+  rhtpaOperator:
+    enabled: true
+    namespace: trusted-profile-analyzer
+    syncWave: "15"
+    channel: stable-v3
+    createOperatorGroup: true
+    routeTimeout: 300s
+    storage:
+      type: s3
+      bucket: trustify
+      # Empty derives https://s3-openshift-storage.<domain>:443
+      regionEndpoint: ""
+
+  # The example application's dev/qa/prod environments — the consumer end of
+  # the CD chain. Wave 16, AFTER everything else, deliberately: each
+  # Application's health includes the Deployment pulling its image, and the
+  # initial tags only appear in Quay after the first ci-build-publish run.
+  # Expect ImagePullBackOff here on a fresh install until promotions land.
+  appEnvironments:
+    enabled: true
+    syncWave: "16"
+    gitGroup: development
+    gitopsRepo: spring-boot-example-gitops
+    revision: main
+    chartPath: app/spring-boot-example
+    environments:
+      - name: dev
+        namespace: spring-boot-example-dev
+        valuesFile: environments/dev/values.yaml
+      - name: qa
+        namespace: spring-boot-example-qa
+        valuesFile: environments/qa/values.yaml
+      - name: prod
+        namespace: spring-boot-example-prod
+        valuesFile: environments/prod/values.yaml

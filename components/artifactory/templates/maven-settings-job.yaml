@@ -1,0 +1,180 @@
+{{- $ns := .Values.namespace }}
+{{- $pns := .Values.pipelineNamespace }}
+# -----------------------------------------------------------------------------
+# The maven-settings sync Job. Builds the pipeline namespace's
+# `maven-settings` Secret -- the settings.xml every build mirrors through --
+# from the SAME Vault-backed admin password the Artifactory chart pins.
+#
+# This used to be a manual step in INSTALL.md; with the password in Vault it
+# is fully automated. Runs on every sync (idempotent create-or-update).
+#
+# The mirror points at the in-cluster Service, not the Route: that also
+# sidesteps the router's 30 s timeout on long dependency resolution.
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifactory-maven-settings
+  namespace: {{ $ns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+data:
+  sync.py: |
+    import base64, json, ssl, sys, urllib.request
+
+    API = "https://kubernetes.default.svc"
+    NS = "{{ $ns }}"
+    PIPELINE_NS = "{{ $pns }}"
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    token = open(SA + "/token").read().strip()
+    ctx = ssl.create_default_context(cafile=SA + "/ca.crt")
+
+    def call(path, method="GET", body=None, ctype="application/json"):
+        req = urllib.request.Request(
+            API + path, method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": "Bearer " + token, "Accept": "application/json",
+                     **({"Content-Type": ctype} if body is not None else {})})
+        with urllib.request.urlopen(req, context=ctx) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None)
+
+    # Read the admin password (bootstrap.creds format: admin@*=<password>).
+    code, secret = call("/api/v1/namespaces/%s/secrets/artifactory-admin" % NS)
+    if code != 200:
+        sys.exit("ERROR: artifactory-admin Secret not readable (%s) -- is ESO running?" % code)
+    raw = base64.b64decode(secret["data"]["password"]).decode()
+    prefix = "admin@*="
+    if not raw.startswith(prefix):
+        sys.exit("ERROR: artifactory-admin password is not in bootstrap.creds format")
+    password = raw[len(prefix):]
+
+    af = "http://artifactory.%s.svc.cluster.local:8082/artifactory" % NS
+    settings = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">\n'
+        '  <servers><server><id>artifactory</id><username>admin</username>'
+        "<password>%s</password></server></servers>\n" % password +
+        '  <mirrors><mirror><id>artifactory</id><name>Artifactory maven virtual</name>\n'
+        "    <url>%s/maven</url><mirrorOf>*</mirrorOf></mirror></mirrors>\n" % af +
+        '</settings>\n'
+    )
+
+    body = {
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "maven-settings", "namespace": PIPELINE_NS},
+        "type": "Opaque",
+        "stringData": {"settings.xml": settings},
+    }
+    code, out = call("/api/v1/namespaces/%s/secrets/maven-settings" % PIPELINE_NS,
+                     method="PUT", body=body)
+    if code not in (200, 201):
+        # PUT on a missing object is 404; create instead.
+        code, out = call("/api/v1/namespaces/%s/secrets" % PIPELINE_NS,
+                         method="POST", body=body)
+    if code not in (200, 201):
+        sys.exit("ERROR: writing maven-settings failed (%s): %s" % (code, out))
+    print("maven-settings written to %s (mirror: %s/maven)" % (PIPELINE_NS, af))
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: artifactory-maven-settings
+  namespace: {{ $ns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: artifactory-maven-settings
+      containers:
+        - name: sync
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3", "/scripts/sync.py"]
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: artifactory-maven-settings
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: artifactory-maven-settings
+  namespace: {{ $ns }}
+---
+# READ access to the admin-password Secret, in THIS namespace: the sync Job
+# reads artifactory-admin here before writing maven-settings into the
+# pipeline namespace. Without this Role the Job 403s on the read (the
+# pipeline-namespace Role below only covers maven-settings) and retries
+# forever.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: artifactory-maven-settings-read
+  namespace: {{ $ns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["artifactory-admin"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: artifactory-maven-settings-read
+  namespace: {{ $ns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: artifactory-maven-settings-read
+subjects:
+  - kind: ServiceAccount
+    name: artifactory-maven-settings
+    namespace: {{ $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: artifactory-maven-settings
+  namespace: {{ $pns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["maven-settings"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: artifactory-maven-settings
+  namespace: {{ $pns }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: artifactory-maven-settings
+subjects:
+  - kind: ServiceAccount
+    name: artifactory-maven-settings
+    namespace: {{ $ns }}

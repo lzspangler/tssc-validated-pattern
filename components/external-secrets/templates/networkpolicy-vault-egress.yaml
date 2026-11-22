@@ -1,0 +1,38 @@
+{{- $v := .Values.vault }}
+# -----------------------------------------------------------------------------
+# The OCP external-secrets operator ships a deny-all NetworkPolicy
+# (eso-sys-deny-all-traffic) in its controller namespace, with allow-rules
+# only for the API server and DNS. Without this policy the controller cannot
+# reach Vault: the ClusterSecretStore sits in "Ready: unable to validate
+# store" with "invalid vault credentials: context deadline exceeded" and no
+# Secret ever materializes. This replicates x2a-fsc's networkpolicy-vault-
+# egress.yaml: egress from the controller namespace to the vault component's
+# server pods on the Vault API port.
+# -----------------------------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-vault
+  namespace: {{ .Values.controllerNamespace }}
+  labels:
+    {{- include "external-secrets.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  # All pods in the controller namespace (the operator curates the rest).
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $v.namespace | default "vault" }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $v.name | default "vault" }}
+              component: server
+      ports:
+        - protocol: TCP
+          port: {{ $v.port | default 8200 }}

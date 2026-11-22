@@ -1,0 +1,188 @@
+{{- $host := include "gitlab.host" . }}
+{{- $subdomain := required "Set cluster.subdomain" .Values.cluster.subdomain }}
+{{- $quay := printf "quay.%s" $subdomain }}
+{{- if and (.Values.pac.enabled | default false) .Values.pipeline.namespace }}
+# -----------------------------------------------------------------------------
+# The .tekton/ PipelineRun definitions, as ConfigMap data keys. NOTE: keys
+# are BASE NAMES ONLY -- a ConfigMap key cannot contain "/" (the API server
+# rejects ".tekton/push-ci.yaml" outright, which is what stalled the gitlab
+# sync on dl265); the seeding playbook prefixes ".tekton/" when it commits
+# them into the repository.
+# repository's default branch. Pipelines-as-Code watches that directory via
+# the Repository CR the same Job creates, and matches runs to events by the
+# annotations below.
+#
+# PaC template variables -- {{ "{{" }} repo_url {{ "}}" }}, {{ "{{" }} revision {{ "}}" }}, ... -- are
+# escaped so Helm passes them through; the HOSTS are Helm-rendered here,
+# because this ConfigMap is rendered once, per cluster, at seed time.
+#
+# Three runs:
+#   .tekton/push-ci.yaml               push to main -> ci-build-publish
+#                                      (build + image + SBOM + dev promotion)
+#   .tekton/pull-request-verify.yaml   MRs -> git-clone + mvn verify, with
+#                                      PaC reporting the status back to the MR
+#   .tekton/generate-tests-comment.yaml /generate-tests-unit comment on an MR
+#                                      -> agentic-test-generation-unit
+#                                      (TECH PREVIEW: on-comment matching)
+#
+# The agentic CVE analysis / remediation pipelines are NOT PaC-triggered:
+# they are operator-invoked (tkn / orchestrator) -- see the RUNBOOK.
+# -----------------------------------------------------------------------------
+kind: ConfigMap
+metadata:
+  name:  cm-pac-pipelines
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+apiVersion: v1
+data:
+  push-ci.yaml: |
+    ---
+    # CI on merge to main: build, publish the image to Quay, attach + upload
+    # its SBOM to RHTPA, then promote the tag into the gitops repo's dev
+    # values (the pipeline's finally task starts gitops-cd-dev).
+    apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      name: ci-build-publish
+      annotations:
+        pipelinesascode.tekton.dev/on-event: "[push]"
+        pipelinesascode.tekton.dev/on-target-branch: "[main]"
+        pipelinesascode.tekton.dev/max-keep-runs: "3"
+    spec:
+      pipelineRef:
+        name: ci-build-publish
+      params:
+        - name: component-name
+          value: spring-boot-example-application
+        - name: git-url
+          value: {{ "{{" }} repo_url {{ "}}" }}
+        - name: revision
+          value: {{ "{{" }} revision {{ "}}" }}
+        - name: output-image
+          value: {{ $quay }}/tssc/spring-boot-example-application:{{ "{{" }} revision {{ "}}" }}
+      workspaces:
+        - name: workspace
+          volumeClaimTemplate:
+            spec:
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 5Gi
+        - name: maven-settings
+          secret:
+            secretName: maven-settings
+        - name: git-auth
+          secret:
+            secretName: scm-auth-secret
+  pull-request-verify.yaml: |
+    ---
+    # MR verification: clone the MR head and run the test suite. PaC reports
+    # the outcome back to the merge request as a commit status; combined with
+    # only_allow_merge_if_pipeline_succeeds on the project, a red run blocks
+    # the merge.
+    apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      name: pull-request-verify
+      annotations:
+        pipelinesascode.tekton.dev/on-event: "[pull_request]"
+        pipelinesascode.tekton.dev/on-target-branch: "[main]"
+        pipelinesascode.tekton.dev/max-keep-runs: "3"
+    spec:
+      params:
+        - name: repo-url
+          value: {{ "{{" }} repo_url {{ "}}" }}
+        - name: revision
+          value: {{ "{{" }} revision {{ "}}" }}
+      pipelineSpec:
+        params:
+          - name: repo-url
+          - name: revision
+        workspaces:
+          - name: source
+          - name: maven-settings
+        tasks:
+          - name: fetch-source
+            taskRef:
+              name: git-clone
+            params:
+              - name: url
+                value: $(params.repo-url)
+              - name: revision
+                value: $(params.revision)
+              - name: subdirectory
+                value: source
+            workspaces:
+              - name: output
+                workspace: source
+              - name: basic-auth
+                workspace: git-auth
+          - name: run-tests
+            taskRef:
+              name: maven
+            params:
+              - name: GOALS
+                value: ["verify"]
+              - name: SUBDIRECTORY
+                value: source
+            workspaces:
+              - name: source
+                workspace: source
+              - name: maven_settings
+                workspace: maven-settings
+      workspaces:
+        - name: source
+          volumeClaimTemplate:
+            spec:
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 5Gi
+        - name: maven-settings
+          secret:
+            secretName: maven-settings
+        - name: git-auth
+          secret:
+            secretName: scm-auth-secret
+  generate-tests-comment.yaml: |
+    ---
+    # TECH PREVIEW (PaC on-comment matching): commenting /generate-tests-unit
+    # on an open merge request generates unit tests for the MR's source
+    # branch and opens the results as its own MR against the target branch.
+    apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      name: generate-tests-unit
+      annotations:
+        pipelinesascode.tekton.dev/on-event: "[pull_request_comment]"
+        pipelinesascode.tekton.dev/on-target-branch: "[main]"
+        pipelinesascode.tekton.dev/on-comment: "^/generate-tests-unit"
+    spec:
+      pipelineRef:
+        name: agentic-test-generation-unit
+      params:
+        - name: git-url
+          value: {{ "{{" }} repo_url {{ "}}" }}
+        - name: revision
+          value: {{ "{{" }} head_sha {{ "}}" }}
+        - name: base-branch
+          value: {{ "{{" }} target_branch {{ "}}" }}
+        - name: git-host
+          value: {{ $host | quote }}
+        - name: scm-provider
+          value: gitlab
+      workspaces:
+        - name: workspace
+          volumeClaimTemplate:
+            spec:
+              accessModes: [ReadWriteOnce]
+              resources:
+                requests:
+                  storage: 5Gi
+        - name: maven-settings
+          secret:
+            secretName: maven-settings
+        - name: git-auth
+          secret:
+            secretName: scm-auth-secret
+{{- end }}

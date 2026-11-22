@@ -1,0 +1,45 @@
+# -----------------------------------------------------------------------------
+# Credential GENERATION into the cluster's existing Vault.
+#
+# One re-runnable Job. For every credential below it GETs
+#   <kvMount>/data/<pathPrefix>/<name>
+# and, only if the entry does not exist yet, generates a value and PUTs it.
+# Re-running never rotates an existing credential -- Argo re-syncs this Job,
+# and rotating a password out from under a running GitLab or Postgres would
+# break the demo, not improve it.
+#
+# The ONE exception is the AI API key: it is externally supplied (the RHDP
+# order form injects a 30-day key via the deployer), so when ai.apiKey is
+# non-empty the Job UPSERTS it, refreshing an expired key on a re-order.
+# When it is empty the Vault entry is left alone -- a key pre-loaded into
+# Vault by the platform works identically.
+#
+# Credential names (consumed by ExternalSecrets in the components):
+#   gitlab-root-password        GitLab root (gitlab ns)
+#   quay-admin-password         Quay superuser (quay-registry ns)
+#   tpa-db-password             RHTPA Postgres (trusted-profile-analyzer ns)
+#   orchestrator-db-password    Orchestrator Postgres
+#   tpa-cli-client-secret       the tpa-cli OIDC client (single most
+#                               load-bearing credential: Keycloak client,
+#                               oidc-tpa-cli Secret and tpa-secret must all
+#                               carry the SAME value)
+#   artifactory-admin-password  Artifactory admin (bootstrap.creds)
+#   artifactory-keys            master-key (32 bytes hex) + join-key (16
+#                               bytes hex), one entry with two keys
+#   artifactory-postgres        postgres-password + password for the bundled
+#                               bitnami PostgreSQL, one entry with two keys
+#   ai-api-key                  the gpt-oss-120b-a5b endpoint key
+# -----------------------------------------------------------------------------
+vault:
+  address: ""
+  namespace: vault
+  tokenSecretName: vault-token
+  tokenSecretKey: token
+  kvMount: secret
+  pathPrefix: tssc-validated-pattern
+
+ai:
+  # Empty = leave whatever Vault already holds (pre-loaded key).
+  apiKey: ""
+
+syncWave: "1"
