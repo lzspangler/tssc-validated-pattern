@@ -1,0 +1,6 @@
+apiVersion: v2
+name: bootstrap
+description: Bootstrap — TSSC validated pattern components as Argo CD Applications (RHDP field-sourced content layout)
+type: application
+version: 0.0.0
+appVersion: "1.0.0"

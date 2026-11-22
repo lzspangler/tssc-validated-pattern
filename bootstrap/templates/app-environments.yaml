@@ -1,0 +1,38 @@
+{{- if .Values.components.appEnvironments.enabled }}
+{{- $ae := .Values.components.appEnvironments }}
+{{- if not .Values.components.gitlab.enabled }}
+{{- fail "components.appEnvironments track the gitops repository the gitlab component's seeding job imports; enable components.gitlab or disable components.appEnvironments" }}
+{{- end }}
+{{- $gitlabHost := printf "gitlab-%s.%s" .Values.components.gitlab.namespace .Values.deployer.domain }}
+{{- range $env := $ae.environments }}
+# -----------------------------------------------------------------------------
+# The {{ $env.name }} environment of the example application. Tracks the
+# gitops repository the GitLab seeding job imports; a promotion merged there
+# (an MR bumping image.tag in {{ $env.valuesFile }}) rolls this deployment.
+#
+# Wave 16, after everything else, on purpose: the Application's health
+# includes the Deployment pulling its image, and on a fresh cluster the
+# imported values file's initial tag does not exist in Quay until the first
+# ci-build-publish run promotes a real one. Expect ImagePullBackOff here
+# until promotions land -- that is the demo working as designed.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" (printf "spring-boot-example-%s" $env.name) "namespace" $.Values.argocd.namespace "syncWave" $ae.syncWave "root" $) }}
+spec:
+  project: {{ $.Values.argocd.project }}
+  source:
+    repoURL: https://{{ $gitlabHost }}/{{ $ae.gitGroup }}/{{ $ae.gitopsRepo }}.git
+    targetRevision: {{ $ae.revision }}
+    path: {{ $ae.chartPath }}
+    helm:
+      valueFiles:
+        - values.yaml
+        - {{ $env.valuesFile }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $env.namespace }}
+  {{- include "bootstrap.syncPolicy" $ | nindent 2 }}
+{{- end }}
+{{- end }}

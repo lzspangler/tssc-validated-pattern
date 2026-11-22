@@ -219,7 +219,7 @@ spec:
     # It resolves through the Artifactory `maven` virtual repo via the
     # maven-settings workspace, which is what makes a Lightwell backport
     # coordinate resolvable at all. See the caveat in the header of
-    # ci-build-triggers.yaml about the Containerfile's own inner `mvn package`,
+    # file about the Containerfile's own inner `mvn package`,
     # which does NOT get these settings.
     - name: package
       params:
@@ -364,7 +364,8 @@ spec:
           values: ["Succeeded"]
 
   # NOTE: the finally task start-gitops-cd-dev is pinned to tekton-triggers-sa
-  # via `taskRunSpecs` on the PipelineRun, in triggers/ci-build-triggers.yaml.
+  # via `taskRunSpecs` on the PipelineRun (the PaC-started run uses the
+  # `pipeline` SA; see start-gitops-cd-dev.yaml for the RBAC that covers it).
   # taskRunSpecs is a PipelineRun-only field: no Tekton Pipeline CRD declares
   # it, so the API server silently prunes it from here (syncs "succeed" but
   # Argo CD stays OutOfSync forever). See the note there for the RBAC

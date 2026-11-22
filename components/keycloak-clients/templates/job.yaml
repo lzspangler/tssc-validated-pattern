@@ -1,0 +1,86 @@
+---
+# Runs on every sync. The script converges rather than duplicating, so a
+# re-run is a no-op that re-asserts the client secret -- which is useful, since
+# that value drifting from `tpa-secret` is the classic cause of RHTPA 401s.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "keycloak-clients.name" . }}
+  namespace: {{ include "keycloak-clients.namespace" . }}
+  labels:
+    {{- include "keycloak-clients.labels" . | nindent 4 }}
+  annotations:
+    # A Job's pod template is immutable, so a plain sync fails with "field is
+    # immutable" and keeps the old one.
+    #
+    # Force=true is REQUIRED alongside Replace=true, not optional polish.
+    # Replace on its own runs `kubectl replace`, which the API server
+    # rejects for a Job because the live object carries a server-generated
+    # spec.selector and controller-uid labels the rendered manifest does
+    # not:
+    #   spec.selector: Required value / `selector` does not match template
+    #   `labels` / spec.selector: field is immutable
+    # The Application then sits OutOfSync forever with a SyncFailed op.
+    # Force makes Argo delete and recreate instead, which is also what
+    # makes "edit the script and re-sync" actually re-run the Job.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  # Keycloak may still be rolling when this first runs; a few retries cover
+  # that without masking a genuine misconfiguration.
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "keycloak-clients.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provision
+          image: {{ .Values.jobImage }}
+          env:
+            # Mounted from the Keycloak operator's generated admin Secret.
+            # This is why the Job runs in the Keycloak namespace: a pod cannot
+            # mount a Secret from another one.
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminSecret.name }}
+                  key: {{ .Values.adminSecret.usernameKey }}
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminSecret.name }}
+                  key: {{ .Values.adminSecret.passwordKey }}
+            # The tpa-cli client secret, materialized from Vault by ESO (see
+            # templates/externalsecret.yaml). Substituted into config.json at
+            # runtime via the __ENV:TPA_CLI_CLIENT_SECRET__ placeholder.
+            - name: TPA_CLI_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tpaCliSecretName | default "tssc-tpa-cli-secret" }}
+                  key: client-secret
+            {{- if .Values.demoUser.enabled }}
+            # The RHTPA console login password, materialized from Vault by
+            # ESO. Substituted into config.json at runtime via the
+            # __ENV:RHTPA_UI_PASSWORD__ placeholder.
+            - name: RHTPA_UI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.demoUser.passwordSecretName | default "tssc-rhtpa-ui-password" }}
+                  key: password
+            {{- end }}
+          # -I isolates the interpreter so nothing is imported from the mounted
+          # directories or the cwd.
+          command: ["python3", "-I", "/scripts/provision.py"]
+          volumeMounts:
+            - mountPath: /scripts
+              name: scripts
+            - mountPath: /config
+              name: config
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "keycloak-clients.name" . }}
+        - name: config
+          secret:
+            secretName: {{ include "keycloak-clients.name" . }}-config

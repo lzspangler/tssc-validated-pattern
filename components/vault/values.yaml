@@ -1,0 +1,34 @@
+# -----------------------------------------------------------------------------
+# A single-node Vault for clusters that do not ship one (the x2a-fsc
+# components/vault shape, self-contained rather than depending on an external
+# chart).
+#
+# What it runs:
+#   * one StatefulSet replica, `hashicorp/vault` with file storage on a PVC
+#   * an entrypoint script (ConfigMap) that, on every start: waits for the
+#     API, runs `vault operator init` ONCE (1 key share, keys + root token
+#     persisted to /vault/data/init.json), unseals with the saved key,
+#     ensures the KV v2 engine is mounted at secret/, and upserts the
+#     root token into the `vault-token` Secret in this namespace via the
+#     Kubernetes API (the pod's own service-account token)
+#   * a Service named `vault` on 8200 -- which is exactly the address the
+#     bootstrap chart derives (http://vault.vault.svc.cluster.local:8200)
+#     for the ClusterSecretStore and the vault-secrets generator
+#
+# This is a DEMO Vault: single node, file backend, TLS disabled in-cluster,
+# root token handed to the demo's components. Not a production pattern.
+#
+# On a cluster that provides its own Vault, set vault.deploy=false in the
+# bootstrap values and point vault.address / vault.tokenSecretName at it.
+# -----------------------------------------------------------------------------
+namespace: vault
+
+image: docker.io/hashicorp/vault:1.17.3
+
+# PVC for the file backend (also holds init.json, so restarts re-unseal).
+storage:
+  capacity: 5Gi
+  # Empty uses the cluster default storage class.
+  storageClassName: ""
+
+syncWave: "0"

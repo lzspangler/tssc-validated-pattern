@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vault
+description: Self-contained single-node Vault (file storage, self-unsealing) plus the vault-token Secret the credential components read
+type: application
+version: 0.0.0
+appVersion: "1.0.0"

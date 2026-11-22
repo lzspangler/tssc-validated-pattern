@@ -261,8 +261,7 @@ out. Every task runs unconditionally except `verify-commit` (optional) and
 | `pipelines/gitops-cd-qa.yaml` | QA GitOps CD — same promotion, into the qa values file, started by a human; the MR stays open for review (`auto-merge="false"`) |
 | `pipelines/test-image-functional.yaml` | Image-level functional test evidence — deploy a published image in a per-run ephemeral namespace, run the `*FT.java` suite against it, comment the summary on the given issue on success |
 | `pipelines/test-image-integration.yaml` | Same for the `*IT.java`/`*IntegrationTest.java` suite; the deployment is a boot smoke-gate, the tests run against in-JVM doubles |
-| `triggers/agentic-issue-triggers.yaml` | Tekton Triggers wiring to start pipelines from a GitLab issue comment — `/remediate` → `agentic-cve-remediation`, `/generate-tests-unit` → `agentic-test-generation-unit`, `/generate-tests-functional` → `agentic-test-generation-functional`, `/generate-tests-integration` → `agentic-test-generation-integration` (one EventListener + interceptors + a binding/template per command + RBAC + Route; the three `/generate-tests*` commands share one TriggerBinding) |
-| `triggers/ci-build-triggers.yaml` | Tekton Triggers wiring for `ci-build-publish` — the push EventListener + `ci-build-push-template` (resolves `output-image` from the commit SHA and the cluster's Quay); also carries the PipelineRun `taskRunSpecs` that pin the `start-gitops-cd-dev` finally task to `tekton-triggers-sa` |
+| *(none)* | There is no `triggers/` directory: CI triggering is **Pipelines as Code**. The `.tekton/` PipelineRuns live in the application repository (committed by the GitLab seeding job from `components/gitlab/templates/cm-pac-pipelines.yaml`), and a PaC `Repository` CR in the pipeline namespace points PaC at the repo — PaC creates the GitLab webhooks itself. |
 | `config/ai-agent-config.yaml` | ConfigMap — the single AI backend switch (provider/model/region/effort) |
 | `config/rhtpa-enable-importers-job.yaml` | Job — idempotently enables + forces the RHTPA Red Hat SBOM/CSAF importers |
 | `ops/rhtpa-upload-advisory.sh` | Script — uploads/verifies/deletes a **single** advisory document (OSV/CSAF/…) in RHTPA, for records no importer covers |
@@ -270,10 +269,7 @@ out. Every task runs unconditionally except `verify-commit` (optional) and
 | `ops/ai-agent-image-prewarm-daemonset.yaml` | DaemonSet — pre-pulls the large agent image onto every node so steps can't flake on ImagePullBackOff |
 | `data/osv/LW-DEMO-001*.json` | OSV advisories — one per CVE, each declaring the Lightwell `.rhlw-00001` backport as the `fixed` version (see [Lightwell remediation data](#lightwell-remediation-data)) |
 | `data/sbom/*.cdx.json` | One-component CycloneDX catalog SBOMs — their only job is to make each `.rhlw-00001` build a *known version* of its base PURL, so the fix-version scan can offer it |
-| `secrets/ai-agent-secret.example.yaml` | Example Secret — AI provider credentials |
-| `secrets/scm-auth-secret.example.yaml` | Example Secret — Git token for opening the PR/MR |
-| `secrets/scm-auth-gitops-secret.example.yaml` | Example Secret — the gitops repository's own token for the gitops CD pipelines (a GitLab project bot cannot be shared across projects, so it is separate from `scm-auth-secret`) |
-| `secrets/gitlab-webhook-secret.example.yaml` | Example Secret — shared token validating the GitLab issue webhook |
+| *(none)* | There is no `secrets/` directory: every Secret is either minted by a seeding job (`scm-auth-secret`, `scm-auth-gitops-secret`, `gitlab-pac-token`, `quay-push`), materialized from Vault by External Secrets Operator (`tpa-secret`, `ai-agent-secret`), or built by a sync Job (`maven-settings`). |
 | `tasks/ai-generate-tests-unit.yaml` | AI generates + runs unit tests |
 | `tasks/ai-generate-tests-integration.yaml` | AI generates + runs integration tests (`*IT.java`) per the `test-generation-integration` skill |
 | `tasks/ai-generate-tests-functional.yaml` | AI generates + runs functional tests (`*FT.java`) per the `test-generation-functional` skill, against the app **deployed** by `deploy-app-under-test`; health-checks it, resets its state (pod deletion) before every verification run, and feeds its server log tail back to the agent on failures |
@@ -592,6 +588,18 @@ issue**:
 | `/generate-tests-unit` | `agentic-test-generation-unit` | no — only the repo coordinates |
 | `/generate-tests-functional` | `agentic-test-generation-functional` | no — only the repo coordinates |
 | `/generate-tests-integration` | `agentic-test-generation-integration` | no — only the repo coordinates |
+
+> **SUPERSEDED — the trigger wiring below describes the pre-PaC layout.**
+> This repository no longer ships `triggers/`: CI is Pipelines as Code (see
+> the directory table above and `bootstrap/README.md`). The sections below
+> are kept for the pipeline *parameters* they document — the trigger
+> mechanism itself (EventListener, interceptors, webhook secret, Route) no
+> longer exists. In the PaC layout: push to `main` runs
+> `.tekton/push-ci.yaml` (ci-build-publish), merge requests run
+> `.tekton/pull-request-verify.yaml`, an MR comment matching
+> `^/generate-tests-unit` runs the test-generation pipeline (tech preview),
+> and the agentic analysis/remediation pipelines are started by hand
+> (`tkn pipeline start …`, see RUNBOOK §6).
 
 All commands share a **single** EventListener, webhook, and Route — the wiring
 lives in `triggers/agentic-issue-triggers.yaml` (EventListener with four
@@ -1105,7 +1113,7 @@ and every CVE that still range-matches it along with the advisory that clears it
 To add another backport: drop an OSV record and a catalog SBOM into `data/`, add
 the `"<base purl>|<remediated purl>"` pair to `PAIRS` in the script, and re-run
 it. Keep the `LW-DEMO-001x` id range clear of the synthetic workshop seeds in
-`automation/gitops/components/lightwell-repo/files/seed/`, which already use
+`components/lightwell-repo/files/seed/`, which already use
 `LW-DEMO-0001` and `-0002`.
 
 #### Why the pipeline needs a VEX suppression pass
@@ -1307,6 +1315,13 @@ many lookups failed so a degraded run is visible rather than merely quieter.
 
 ## One-time setup
 
+> **On a GitOps install there is nothing to do here except step 1** — the
+> Argo Applications install the tasks/config/pipelines, the GitLab and Quay
+> seeding jobs mint the SCM/robot/PaC credentials, External Secrets
+> Operator materializes `tpa-secret` / `ai-agent-secret` from Vault, and the
+> Artifactory component's sync Job writes `maven-settings`. The steps below
+> remain for a standalone (non-GitOps) installation of just this layer.
+
 1. **Build & push the images**, then set the pipeline params (or edit the
    defaults) `agent-image` and `ai-python-image`. Build the agent flavor matching
    your `AI_AGENT` (or both):
@@ -1320,10 +1335,11 @@ many lookups failed so a degraded run is visible rather than merely quieter.
    ```
    Set `agent-image` to the `-claude` or `-aider` reference to match `AI_AGENT`.
 
-2. **Create the AI backend Secret** in `tssc-app-ci` from the example (fill in a
-   real key; do not commit it):
+2. **Create the AI backend Secret** in `tssc-app-ci` (on a GitOps install
+   ESO materializes it from Vault — key `OPENAI_API_KEY` only):
    ```
-   oc -n tssc-app-ci create -f secrets/ai-agent-secret.example.yaml   # after editing REPLACE_ME
+   oc -n tssc-app-ci create secret generic ai-agent-secret \
+       --from-literal=OPENAI_API_KEY='<key>'
    ```
 
 3. **Apply the ConfigMap** (this is where you pick the provider/model):
@@ -1333,9 +1349,10 @@ many lookups failed so a degraded run is visible rather than merely quieter.
 
 4. **Create the SCM Secret** with a token that can push a branch and open a
    PR/MR (GitLab: `api` + `write_repository`; GitHub: Contents + Pull requests
-   write):
+   write). On a GitOps install the GitLab seeding job mints this for you:
    ```
-   oc -n tssc-app-ci create -f secrets/scm-auth-secret.example.yaml   # after editing REPLACE_ME
+   oc -n tssc-app-ci create secret generic scm-auth-secret \
+       --from-literal=username=oauth2 --from-literal=token='<pat>'
    ```
 
 5. **Apply the tasks + agent-skill ConfigMaps + pipelines** (apply everything,

@@ -1,0 +1,136 @@
+# -----------------------------------------------------------------------------
+# InstallPlan approver: the Subscription above uses Manual approval, so this
+# Job watches for the InstallPlan the subscription creates and approves it.
+# Re-runnable: it exits 0 immediately once the CSV is present.
+#
+# Pure stdlib against the in-cluster API -- no oc, no pip.
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: external-secrets-installplan-approver
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "external-secrets.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  approve.py: |
+    import json, ssl, sys, time, urllib.request
+
+    API = "https://kubernetes.default.svc"
+    NS = "{{ .Values.namespace }}"
+    OP_NAME = "{{ .Values.operator.name }}"
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    token = open(SA + "/token").read().strip()
+    ctx = ssl.create_default_context(cafile=SA + "/ca.crt")
+
+    def call(path, method="GET", body=None):
+        req = urllib.request.Request(
+            API + path, method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": "Bearer " + token,
+                     "Accept": "application/json",
+                     **({"Content-Type": "application/json"} if body is not None else {})})
+        with urllib.request.urlopen(req, context=ctx) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None)
+
+    # Wait for the CSV (operator fully installed) -- approving is idempotent,
+    # so the loop simply retries until the InstallPlan is approved AND the
+    # CSV is present.
+    for _ in range(120):
+        done = False
+        code, csvs = call("/apis/operators.coreos.com/v1alpha1/namespaces/%s/clusterserviceversions" % NS)
+        if code == 200 and csvs:
+            for csv in csvs.get("items", []):
+                if csv["metadata"]["name"].startswith(OP_NAME):
+                    done = True
+                    break
+        if done:
+            print("CSV for %s is present" % OP_NAME)
+            sys.exit(0)
+        code, plans = call("/apis/operators.coreos.com/v1alpha1/namespaces/%s/installplans" % NS)
+        if code == 200:
+            for plan in plans.get("items", []):
+                if plan.get("spec", {}).get("approval") != "Manual":
+                    continue
+                # Only approve plans owned by our subscription.
+                owner = plan["metadata"].get("ownerReferences", [])
+                if not any("subscription" in o.get("kind", "").lower() for o in owner):
+                    continue
+                if plan.get("status", {}).get("phase") == "RequiresApproval":
+                    call("/apis/operators.coreos.com/v1alpha1/namespaces/%s/installplans/%s/approve"
+                         % (NS, plan["metadata"]["name"]), method="PATCH", body={})
+                    print("Approved InstallPlan %s" % plan["metadata"]["name"])
+        time.sleep(5)
+    sys.exit("ERROR: operator CSV %s never appeared" % OP_NAME)
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: external-secrets-installplan-approve
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "external-secrets.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    # A plain resource (NOT an Argo hook): with the controller crashlooping
+    # through OOM during first boot, a Sync hook never ran at all on dl265
+    # and the InstallPlan sat unapproved. Replace re-runs it on every sync;
+    # the script is idempotent and exits once the CSV is present.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: external-secrets-approver
+      containers:
+        - name: approve
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3", "/scripts/approve.py"]
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: external-secrets-installplan-approver
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: external-secrets-approver
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "external-secrets.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["installplans", "clusterserviceversions", "subscriptions"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: external-secrets-approver
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "external-secrets.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: external-secrets-approver
+subjects:
+  - kind: ServiceAccount
+    name: external-secrets-approver
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-secrets-approver
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "external-secrets.labels" . | nindent 4 }}

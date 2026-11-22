@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vault-secrets
+description: Generates every credential the demo needs into the cluster's existing Vault (idempotent)
+type: application
+version: 0.0.0
+appVersion: "1.0.0"
