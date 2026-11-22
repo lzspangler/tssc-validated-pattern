@@ -84,7 +84,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "-1"
 data:
   vault.hcl: |
-    ui = false
+    ui = true
     disable_mlock = true
 
     storage "file" {
