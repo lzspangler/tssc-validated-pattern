@@ -377,10 +377,19 @@ data:
           | gsub("projects/1/"; "projects/" + $pid + "/")
           | gsub("PROJECT_ID = \"1\""; "PROJECT_ID = \"" + $pid + "\"")
           else . end);
-        (if $cid != "" then
-           .nodes |= map(if .type == "http_request" and (.parameters // {}).credential_id
-                         then .parameters.credential_id = $cid else . end)
-         else . end)
+        # http_request nodes get the GitLab credential; the AGENTIC node's
+        # direct-LLM references (credential_id, llm_model_id) are STRIPPED --
+        # in this demo the orchestrator triggers Tekton pipelines and the
+        # LLM work happens inside them, so the platform needs no model.
+        # Left in place they reference the authoring cluster's model and the
+        # import fails with "The previously selected LLM model is no longer
+        # available" on a fresh install with no models configured.
+        .nodes |= map(
+            if .type == "http_request" and (.parameters // {}).credential_id and $cid != ""
+            then .parameters.credential_id = $cid
+            elif .type == "agentic"
+            then .parameters |= (del(.credential_id) | del(.llm_model_id))
+            else . end)
         | rw' "${SRC}" > /tmp/ao-wf.json
 
       # Import or update: match by name, PATCH in place, otherwise POST as
