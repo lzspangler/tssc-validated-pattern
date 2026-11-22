@@ -142,6 +142,23 @@ data:
             status_code: 200
           register: r_users
 
+{{- if .Values.gitops.repoUrl }}
+
+        # ---- clone this repository for the application files --------------
+        # The seeding Job reads the application and gitops source files from
+        # the SAME repo Argo syncs from -- apps/<name>/application/ and
+        # apps/<name>/gitops/ -- so the demo is fully contained in one repo.
+        - name: Clone the GitOps repository for application files
+          ansible.builtin.shell: |
+            set -e
+            rm -rf /tmp/repo
+            git clone --quiet --depth 1 --branch {{ .Values.gitops.revision | default "main" }} \
+              {{ .Values.gitops.repoUrl }} /tmp/repo
+            echo "Cloned {{ .Values.gitops.repoUrl }} @ {{ .Values.gitops.revision | default "main" }} -> /tmp/repo"
+          args:
+            executable: /bin/bash
+{{- end }}
+
 {{- range $group := .Values.gitlab.groups }}
 
         - name: Create group {{ $group.name }}
@@ -181,14 +198,13 @@ data:
 {{- range $repo := $group.repo }}
 {{- $slug := printf "%s%%2F%s" $group.name $repo.name }}
 
-        - name: Import repository {{ $repo.name }} into {{ $group.name }}
+        - name: Create project {{ $repo.name }} in {{ $group.name }}
           ansible.builtin.uri:
             url: https://{{ $host }}/api/v4/projects
             method: POST
             body_format: form-urlencoded
             body:
               name: {{ $repo.name }}
-              import_url: {{ $repo.url }}
               visibility: public
               issues_access_level: enabled
               builds_access_level: enabled
@@ -199,9 +215,6 @@ data:
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
             validate_certs: false
-            # The import is a server-side clone of a GitHub repository; on a
-            # cold cluster it can sit well past the default 30 s.
-            timeout: 300
             status_code:
               - 201
               - 400
@@ -213,6 +226,59 @@ data:
           failed_when:
             - r_import.status == 400
             - "'has already been taken' not in (r_import.json | default({}) | string)"
+
+{{- if $repo.source }}
+
+        # Push the application files from the GitOps repo as the initial
+        # commit. The seeding Job already cloned this repository (for the
+        # PaC workflow definitions); `source` is a repo-relative path under
+        # apps/. The GitLab commits API takes an `actions` array -- one
+        # entry per file -- so the entire directory tree lands in a single
+        # atomic commit. A project created with no import_url has an empty
+        # repository (no branches), so the first file create also creates
+        # the default branch.
+        - name: Populate {{ $repo.name }} from {{ $repo.source }}
+          when: r_import.status == 201
+          ansible.builtin.shell: |
+            set -e
+            SOURCE_DIR="/tmp/repo/{{ $repo.source }}"
+            [ -d "{{ "{{" }} SOURCE_DIR {{ "}}" }}" ] || { echo "ERROR: {{ $repo.source }} not found in the cloned repo"; exit 1; }
+
+            # Build the actions JSON array (one create per file)
+            ACTIONS="["
+            FIRST=true
+            while IFS= read -r -d '' FILE; do
+              REL_PATH="${FILE#{{ "{{" }} SOURCE_DIR {{ "}}" }}/}"
+              CONTENT_B64=$(base64 -w 0 < "{{ "{{" }} FILE {{ "}}" }}")
+              if [ "$FIRST" = true ]; then
+                FIRST=false
+              else
+                ACTIONS+=","
+              fi
+              ACTIONS+="{\"action\":\"create\",\"file_path\":\"${REL_PATH}\",\"encoding\":\"base64\",\"content\":\"${CONTENT_B64}\"}"
+            done < <(find "{{ "{{" }} SOURCE_DIR {{ "}}" }}" -type f -print0)
+            ACTIONS+="]"
+
+            # Count files (for the log)
+            FILE_COUNT=$(echo "{{ "{{" }} ACTIONS {{ "}}" }}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
+            echo "Committing ${FILE_COUNT} files to {{ $repo.name }}"
+
+            # Push as the initial commit via the commits API
+            RESP=$(curl -s --request POST \
+              "https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/commits" \
+              --header "PRIVATE-TOKEN: {{ "{{" }} root_token {{ "}}" }}" \
+              --header "Content-Type: application/json" \
+              --data "{{ "{{" }} ACTIONS | python3 -c 'import json,sys;a=json.load(sys.stdin);print(json.dumps({"branch":"{{ $repo.defaultBranch | default "main" }}","commit_message":"Initial import from tssc-validated-pattern","actions":a}))' {{ "}}" }}")
+            echo "$RESP" | python3 -c '
+            import json,sys
+            r=json.load(sys.stdin)
+            if "id" in r:
+                print("  committed:", r.get("short_id","?"), "on", r.get("branch","?"))
+            else:
+                print("  ERROR:", json.dumps(r)[:200]); sys.exit(1)'
+          args:
+            executable: /bin/bash
+{{- end }}
 
 {{- if ne ($repo.defaultBranch | default "main") "main" }}
 
@@ -233,12 +299,9 @@ data:
           until: r_default_branch.status == 200
 {{- end }}
 
-        # The import runs asynchronously: POST /projects returns 201 as soon as
-        # the project row exists, long before the clone lands. Labels and the
-        # .tekton definitions can be committed immediately, but waiting here
-        # means the demo
-        # is actually usable the moment the Job reports success.
-        - name: Wait for the {{ $repo.name }} import to finish
+        # Look up the project id (works whether the project was just created
+        # or already existed from a previous run).
+        - name: Look up project {{ $repo.name }}
           ansible.builtin.uri:
             url: https://{{ $host }}/api/v4/projects/{{ $slug }}
             method: GET
@@ -247,11 +310,9 @@ data:
             validate_certs: false
             status_code: 200
           register: r_project_{{ $repo.name | replace "-" "_" }}
-          retries: 60
-          delay: 10
-          until: >-
-            r_project_{{ $repo.name | replace "-" "_" }}.json.import_status | default('none')
-            in ['finished', 'none']
+          retries: 10
+          delay: 5
+          until: r_project_{{ $repo.name | replace "-" "_" }}.status == 200
 
         - name: Remember the {{ $repo.name }} project id
           set_fact:
