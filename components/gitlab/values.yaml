@@ -136,6 +136,31 @@ gitlab:
             # GitLab rejects an expiry more than 365 days out; stay inside it.
             expiresInDays: 364
 
+        # The Lightwell Java demo application -- the second example app,
+        # with the same remediation treatment (CVE analysis, issues, PaC).
+        - name: lightwell-java-demo-app
+          source: apps/lightwell-java-demo/application
+          defaultBranch: main
+          labels:
+            - { name: cve, color: "#6699cc" }
+            - { name: security, color: "#6699cc" }
+            - { name: critical, color: "#6699cc" }
+            - { name: high, color: "#6699cc" }
+            - { name: medium, color: "#6699cc" }
+            - { name: low, color: "#6699cc" }
+            - { name: unknown, color: "#6699cc" }
+          pac:
+            enabled: true
+            tokenName: lightwell-demo-pac
+          accessToken:
+            enabled: true
+            name: lightwell-demo-pipeline
+            scopes:
+              - api
+              - write_repository
+            accessLevel: 40
+            expiresInDays: 364
+
         # The gitops repository: what the gitops-cd-dev pipeline promotes into
         # (MR bumping image.tag in app/spring-boot-example/environments/dev/
         # values.yaml) and what the spring-boot-example-dev Argo CD Application
@@ -177,6 +202,26 @@ gitlab:
             # while the protected default branch stays closed to direct push.
             accessLevel: 40
             # GitLab rejects an expiry more than 365 days out; stay inside it.
+            expiresInDays: 364
+
+        # The Lightwell Java demo gitops repository -- same promotion
+        # pattern as spring-boot-example-gitops.
+        - name: lightwell-java-demo-app-gitops
+          source: apps/lightwell-java-demo/gitops
+          defaultBranch: main
+          rewriteImageRepository:
+            enabled: true
+            file: app/lightwell-java-demo/values.yaml
+            quayOrganization: tssc
+            component: lightwell-java-demo-app
+          accessToken:
+            enabled: true
+            name: lightwell-demo-pipeline-gitops
+            secretName: scm-auth-lightwell-gitops-secret
+            scopes:
+              - api
+              - write_repository
+            accessLevel: 40
             expiresInDays: 364
       project: []
 
