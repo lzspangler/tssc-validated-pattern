@@ -335,6 +335,20 @@ data:
         if [ "${AO_CODE}" = "201" ] || [ "${AO_CODE}" = "200" ]; then
           NEW_CRED_ID="$(printf '%s' "${AO_BODY}" | jq -r '.id // empty' 2>/dev/null || true)"
           log "Created platform credential for GitLab (id: ${NEW_CRED_ID})"
+        elif echo "${AO_BODY}" | grep -q "NAME_CONFLICT"; then
+          # Idempotent re-run: a credential named gitlab-demo already exists
+          # in the project (created by an earlier run or by hand). Look it
+          # up and reuse its id -- the token inside may be the same
+          # scm-auth-secret value anyway.
+          ao_get "/credentials"
+          if [ "${AO_CODE}" = "200" ]; then
+            NEW_CRED_ID="$(printf '%s' "${AO_BODY}" | jq -r '(if type == "array" then . else (.resources // []) end)[] | select(.name == "gitlab-demo") | .id' 2>/dev/null | head -1 || true)"
+          fi
+          if [ -n "${NEW_CRED_ID}" ]; then
+            log "Credential gitlab-demo already exists (id: ${NEW_CRED_ID}); reusing it"
+          else
+            die "credential name conflict but could not look up the existing gitlab-demo credential (GET /credentials HTTP ${AO_CODE})"
+          fi
         else
           die "credential creation returned HTTP ${AO_CODE}: $(printf '%s' "${AO_BODY}" | head -c 200) -- the workflow import would fail on invalid credential references"
         fi
