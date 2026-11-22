@@ -23,6 +23,12 @@ cluster:
   # No leading dot. Required.
   subdomain: ""
 
+# The GitOps repository the seeding Job clones to read application and
+# gitops files under apps/. Set by bootstrap from gitops.repoURL/revision.
+gitops:
+  repoUrl: ""
+  revision: main
+
 gitlab:
   image: quay.io/redhat-gpte/gitlab:17.4.1
 
@@ -78,8 +84,14 @@ gitlab:
     - name: development
       users: []
       repo:
+        # `source` is a repo-relative path under apps/ in the GitOps
+        # repository -- the seeding Job clones THIS repo and pushes the
+        # files as the project's initial commit via the GitLab API. No
+        # external GitHub dependency. To add more example applications,
+        # add a directory under apps/<name>/application/ and
+        # apps/<name>/gitops/, then add entries here.
         - name: spring-boot-example-application
-          url: https://github.com/lzspangler/spring-boot-example-application.git
+          source: apps/spring-boot-example/application
           defaultBranch: main
 
           # The CVE issues opened by `open-cve-issues` carry a severity label
@@ -130,7 +142,7 @@ gitlab:
         # tracks. No labels, no webhooks -- nothing ever pushes here except the
         # promotion pipeline, and no GitLab hook should fire on its merges.
         - name: spring-boot-example-gitops
-          url: https://github.com/lzspangler/spring-boot-example-gitops.git
+          source: apps/spring-boot-example/gitops
           defaultBranch: main
 
           # Imported repos carry the cluster they were authored on: the chart's
