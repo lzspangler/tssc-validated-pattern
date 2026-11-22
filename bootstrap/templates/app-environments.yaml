@@ -36,3 +36,33 @@ spec:
   {{- include "bootstrap.syncPolicy" $ | nindent 2 }}
 {{- end }}
 {{- end }}
+
+{{- if .Values.components.appEnvironments.lightwellEnvironments.enabled }}
+{{- $lw := .Values.components.appEnvironments.lightwellEnvironments }}
+{{- $gitlabHost := printf "gitlab-%s.%s" .Values.components.gitlab.namespace .Values.deployer.domain }}
+{{- range $env := $lw.environments }}
+# -----------------------------------------------------------------------------
+# The {{ $env.name }} environment of the Lightwell Java demo application.
+# Same pattern as spring-boot-example: tracks the lightwell-java-demo-app-gitops
+# repository the GitLab seeding job creates from apps/lightwell-java-demo/gitops.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: {{ $.Values.argocd.project }}
+  source:
+    repoURL: https://{{ $gitlabHost }}/{{ $lw.gitGroup }}/{{ $lw.gitopsRepo }}.git
+    targetRevision: {{ $lw.revision }}
+    path: {{ $lw.chartPath }}
+    helm:
+      valueFiles:
+        - values.yaml
+        - {{ $env.valuesFile }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $env.namespace }}
+  {{- include "bootstrap.syncPolicy" $ | nindent 2 }}
+{{- include "bootstrap.metadata" (dict "name" (printf "lightwell-java-demo-%s" $env.name) "namespace" $.Values.argocd.namespace "syncWave" $.Values.components.appEnvironments.syncWave "root" $) }}
+{{- end }}
+{{- end }}

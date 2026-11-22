@@ -253,3 +253,21 @@ components:
       - name: prod
         namespace: spring-boot-example-prod
         valuesFile: environments/prod/values.yaml
+    # The Lightwell Java demo application environments -- same pattern,
+    # separate chart path and namespaces.
+    lightwellEnvironments:
+      enabled: true
+      gitGroup: development
+      gitopsRepo: lightwell-java-demo-app-gitops
+      revision: main
+      chartPath: app/lightwell-java-demo
+      environments:
+        - name: dev
+          namespace: lightwell-java-demo-dev
+          valuesFile: environments/dev/values.yaml
+        - name: qa
+          namespace: lightwell-java-demo-qa
+          valuesFile: environments/qa/values.yaml
+        - name: prod
+          namespace: lightwell-java-demo-prod
+          valuesFile: environments/prod/values.yaml
