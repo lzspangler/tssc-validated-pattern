@@ -189,4 +189,43 @@ data:
             else:
                 print("role-map     %-18s service-account-%s" % (role_name, cid))
 
+    # --- demo user (RHTPA console login) -----------------------------------
+    # A fresh realm has NO users: without one, the RHTPA UI has a login page
+    # nobody can authenticate to. Create the user, set the password from the
+    # Vault-backed Secret, and assign the roles the console needs. Idempotent:
+    # existing users keep their password (re-running only asserts the roles).
+    if CFG.get("demoUser"):
+        du = CFG["demoUser"]
+        st, found = req("GET", "%s/users?username=%s" % (BASE, du["username"]), token=TOKEN)
+        if st == 200 and found:
+            user_id = found[0]["id"]
+            print("user         %-18s exists (password unchanged)" % du["username"])
+        else:
+            st, err = req("POST", BASE + "/users", body={
+                "username": du["username"],
+                "firstName": "Demo",
+                "lastName": "User",
+                "email": du["username"] + "@redhat.com",
+                "enabled": True,
+                "emailVerified": True,
+                "credentials": [{"type": "password", "value": du["password"], "temporary": False}],
+            }, token=TOKEN)
+            if st not in (201, 409):
+                sys.exit("ERROR: creating user %s: %s %s" % (du["username"], st, err))
+            st, found = req("GET", "%s/users?username=%s" % (BASE, du["username"]), token=TOKEN)
+            user_id = found[0]["id"]
+            print("user         %-18s created (password from Vault)" % du["username"])
+
+        for role_name in du.get("realmRoles", []):
+            st, role = req("GET", "%s/roles/%s" % (BASE, role_name), token=TOKEN)
+            if st != 200:
+                print("WARNING: role %s not found for user %s" % (role_name, du["username"]))
+                continue
+            st, err = req("POST", "%s/users/%s/role-mappings/realm" % (BASE, user_id),
+                          body=[role], token=TOKEN)
+            if st in (204, 409):
+                print("role-map     %-18s -> %s" % (role_name, du["username"]))
+            else:
+                print("WARNING: granting %s to %s: %s %s" % (role_name, du["username"], st, err))
+
     print("OK: realm %r provisioned for ssc-demo" % REALM)

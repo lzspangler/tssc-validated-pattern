@@ -59,6 +59,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.tpaCliSecretName | default "tssc-tpa-cli-secret" }}
                   key: client-secret
+            {{- if .Values.demoUser.enabled }}
+            # The RHTPA console login password, materialized from Vault by
+            # ESO. Substituted into config.json at runtime via the
+            # __ENV:RHTPA_UI_PASSWORD__ placeholder.
+            - name: RHTPA_UI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.demoUser.passwordSecretName | default "tssc-rhtpa-ui-password" }}
+                  key: password
+            {{- end }}
           # -I isolates the interpreter so nothing is imported from the mounted
           # directories or the cwd.
           command: ["python3", "-I", "/scripts/provision.py"]

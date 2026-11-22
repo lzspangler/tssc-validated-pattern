@@ -49,6 +49,7 @@ RHTAS and RHTPA — they cannot disagree.
 | Client | `tpa-frontend` | public — browser login to the RHTPA console |
 | Client | `trusted-artifact-signer` | public — RHTAS validates cosign identities against it |
 | Role mapping | `tpa-admin` on `service-account-tpa-cli` | without it every SBOM upload authenticates fine and then 403s |
+| User | `demo` (password from Vault entry `rhtpa-ui-password`) | browser login to the RHTPA console; assigned `tpa-admin` so the UI shows analysis results. Without a user in the realm, the RHTPA console has a login page nobody can authenticate to |
 
 It does **not** touch existing clients, users, or identity-provider
 configuration. Every step reads before it writes, so re-running converges
