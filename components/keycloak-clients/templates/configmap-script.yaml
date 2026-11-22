@@ -152,6 +152,27 @@ data:
             st, err = req("PUT", "%s/clients/%s" % (BASE, uid), body=merged, token=TOKEN)
             if st not in (204, 200):
                 sys.exit("ERROR: updating client %s: %s %s" % (cid, st, err))
+            # SECRET ASSERTION. The PUT above merges the representation,
+            # which includes the `secret` field -- but Keycloak may have
+            # generated its own random secret at client creation (before
+            # this job first ran, or during a bootstrap where the Vault
+            # value was not yet materialized), and a PUT with a merged
+            # body can silently leave the old secret in place. This
+            # happened on dl265: the tpa-cli client carried a
+            # Keycloak-generated secret while Vault, the pipeline and
+            # RHTPA all had the correct one -- every SBOM upload 401d.
+            # Read the client BACK and force the secret if it drifted.
+            expected_secret = rep.get("secret")
+            if expected_secret:
+                st, check = req("GET", "%s/clients/%s" % (BASE, uid), token=TOKEN)
+                if st == 200 and check.get("secret") != expected_secret:
+                    check["secret"] = expected_secret
+                    st, err = req("PUT", "%s/clients/%s" % (BASE, uid), body=check, token=TOKEN)
+                    if st not in (204, 200):
+                        sys.exit("ERROR: forcing secret on %s: %s %s" % (cid, st, err))
+                    print("secret       %-18s -> forced to match Vault (was drifted)" % cid)
+                elif st == 200:
+                    print("secret       %-18s matches" % cid)
             print("client       %-18s updated" % cid)
         else:
             st, err = req("POST", BASE + "/clients", body=rep, token=TOKEN)
