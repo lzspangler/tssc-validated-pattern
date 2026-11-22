@@ -377,11 +377,11 @@ data:
           | gsub("projects/1/"; "projects/" + $pid + "/")
           | gsub("PROJECT_ID = \"1\""; "PROJECT_ID = \"" + $pid + "\"")
           else . end);
-        # http_request nodes get the GitLab credential; the AGENTIC node's
+        # http_request nodes get the GitLab credential; the AGENTIC node
         # direct-LLM references (credential_id, llm_model_id) are STRIPPED --
         # in this demo the orchestrator triggers Tekton pipelines and the
         # LLM work happens inside them, so the platform needs no model.
-        # Left in place they reference the authoring cluster's model and the
+        # Left in place they reference the authoring-cluster model and the
         # import fails with "The previously selected LLM model is no longer
         # available" on a fresh install with no models configured.
         .nodes |= map(
