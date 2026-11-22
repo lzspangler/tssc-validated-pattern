@@ -645,6 +645,13 @@ data:
                 # oauth2 as the username for a GitLab token.
                 username: oauth2
                 token: '{{ "{{" }} r_pat.json.token {{ "}}" }}'
+                # The cluster-resolved git-clone task expects a `password`
+                # key (its kubernetes.io/basic-auth compatibility path reads
+                # username + password); without it the clone step dies with
+                # "Unknown basic-auth workspace format". The open-pr and
+                # open-cve-issues tasks read `token` directly. Same value,
+                # two keys, both consumers work.
+                password: '{{ "{{" }} r_pat.json.token {{ "}}" }}'
 {{- end }}
 {{- end }}
 
