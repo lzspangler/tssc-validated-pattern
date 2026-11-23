@@ -16,6 +16,13 @@
 # escaped so Helm passes them through; the HOSTS are Helm-rendered here,
 # because this ConfigMap is rendered once, per cluster, at seed time.
 #
+# The variables MUST sit inside a double-quoted YAML string: the committed
+# file has to read value: "<double-quote><open-brace><open-brace> repo_url
+# <close-brace><close-brace><double-quote>". A bare, unquoted variable
+# parses as a YAML flow mapping, and PaC's unmarshal of the .tekton file
+# dies with "invalid map key" -- one bad file aborts the whole event, so no
+# PipelineRun from ANY .tekton file in the repo.
+#
 # Three runs:
 #   .tekton/push-ci.yaml               push to main -> ci-build-publish
 #                                      (build + image + SBOM + dev promotion)
@@ -59,11 +66,11 @@ data:
         - name: component-name
           value: spring-boot-example-application
         - name: git-url
-          value: {{ "{{" }} repo_url {{ "}}" }}
+          value: "{{ "{{" }} repo_url {{ "}}" }}"
         - name: revision
-          value: {{ "{{" }} revision {{ "}}" }}
+          value: "{{ "{{" }} revision {{ "}}" }}"
         - name: output-image
-          value: {{ $quay }}/tssc/spring-boot-example-application:{{ "{{" }} revision {{ "}}" }}
+          value: "{{ $quay }}/tssc/spring-boot-example-application:{{ "{{" }} revision {{ "}}" }}"
       workspaces:
         - name: workspace
           volumeClaimTemplate:
@@ -95,9 +102,9 @@ data:
     spec:
       params:
         - name: repo-url
-          value: {{ "{{" }} repo_url {{ "}}" }}
+          value: "{{ "{{" }} repo_url {{ "}}" }}"
         - name: revision
-          value: {{ "{{" }} revision {{ "}}" }}
+          value: "{{ "{{" }} revision {{ "}}" }}"
       pipelineSpec:
         params:
           - name: repo-url
@@ -166,11 +173,11 @@ data:
         name: agentic-test-generation-unit
       params:
         - name: git-url
-          value: {{ "{{" }} repo_url {{ "}}" }}
+          value: "{{ "{{" }} repo_url {{ "}}" }}"
         - name: revision
-          value: {{ "{{" }} head_sha {{ "}}" }}
+          value: "{{ "{{" }} head_sha {{ "}}" }}"
         - name: base-branch
-          value: {{ "{{" }} target_branch {{ "}}" }}
+          value: "{{ "{{" }} target_branch {{ "}}" }}"
         - name: git-host
           value: {{ $host | quote }}
         - name: scm-provider
