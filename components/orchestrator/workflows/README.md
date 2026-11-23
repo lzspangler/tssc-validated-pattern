@@ -238,14 +238,16 @@ kept here because it explains what the workflow scripts actually depend on.
 
 ### Assumptions worth knowing
 
-- **Build↔issue correlation**: the workflow takes the first
-  `ci-build-publish` run that succeeds *after* the issue's remediation run
-  finished as the image to test. With one issue in flight (how the demo
-  runs) that is exactly the merge-triggered build of that issue's MR; with
-  several issues merging concurrently, correlating a build to a specific
-  issue would need GitLab API access from the polling script (which has no
-  credential injection) — the workflow would need an extra authenticated
-  node if that ever matters.
+- **Build↔issue correlation**: the wait node resolves the remediation MR
+  from the remediation run's `REMEDIATION_PR_URL` result, polls the GitLab
+  API (the app repo's project token, read from `scm-auth-secret` in the
+  pipeline namespace — the worker RBAC grants exactly that Secret) until
+  *that* MR reaches `merged`, and then waits for the `ci-build-publish`
+  run whose `revision` param equals the MR's merge commit. The earlier
+  design took the first successful build created *anywhere* after the
+  remediation finished, which matched the background of unrelated builds
+  (`.tekton` definition updates, other merges) and proceeded without
+  waiting for the merge at all.
 - **In-cluster script execution**: the design assumes workflow script pods
   run on this cluster and can reach `kubernetes.default.svc` with a
   projected SA token. If the orchestrator executes scripts elsewhere, move

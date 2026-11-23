@@ -8,10 +8,12 @@
 #   * The root password is a Vault credential (ESO materializes it), not a
 #     Helm value.
 #   * The RHDH software-template import job is gone (no Developer Hub here).
-#   * Added: per-repository labels, project access tokens written straight
-#     into the pipeline namespace as `scm-auth-secret` /
-#     `scm-auth-gitops-secret`, and the full Pipelines-as-Code wiring (PaC
-#     token, .tekton/ definitions committed into the application repo,
+#   * Added: per-repository labels, one project access token per repository
+#     written straight into the pipeline namespace (`scm-auth-secret`,
+#     `scm-auth-lightwell-secret`, `scm-auth-gitops-secret`,
+#     `scm-auth-lightwell-gitops-secret`), and the full Pipelines-as-Code
+#     wiring (a per-repo PaC token, .tekton/ definitions committed into the
+#     application repo,
 #     Repository CR). See templates/cm-gitlab-init.yaml.
 #
 # The only value that MUST be set per cluster is `cluster.subdomain`;
@@ -109,12 +111,18 @@ gitlab:
             - { name: unknown, color: "#6699cc" }
 
           # Pipelines-as-Code wiring for this repository. The seeding job
-          # mints a project access token for PaC (gitlab-pac-token), commits
-          # the .tekton/ PipelineRun definitions (rendered per cluster from
-          # templates/cm-pac-pipelines.yaml) into the default branch, and
-          # creates the Repository CR in the pipeline namespace. PaC itself
-          # creates and validates the GitLab webhooks -- there is no
-          # EventListener anywhere -- PaC owns the webhooks.
+          # mints THIS repository's project access token for PaC
+          # (gitlab-pac-token-spring-boot-example-application -- one per
+          # repo, since a project bot cannot read any other project),
+          # commits the .tekton/ PipelineRun definitions (rendered per
+          # cluster from templates/cm-pac-pipelines.yaml) into the default
+          # branch, and creates the Repository CR in the pipeline
+          # namespace. It also
+          # registers BOTH GitLab webhooks: the PaC webhook (push / MR
+          # events, which PaC does not reliably create itself) and the
+          # issue-comment webhook pointing at the agentic-issue-commands
+          # EventListener (pipelines/triggers/), the only consumer that can
+          # match /remediate and /generate-tests-* on ISSUES.
           pac:
             enabled: true
             tokenName: ssc-demo-pac
@@ -155,6 +163,14 @@ gitlab:
           accessToken:
             enabled: true
             name: lightwell-demo-pipeline
+            # Its OWN Secret, not the spring-boot application's
+            # scm-auth-secret: a GitLab project-bot user is a member of
+            # exactly one project, so a shared Secret would leave this
+            # repo's remediation/test-generation runs pushing with the
+            # OTHER project's token (403). The EventListener's cel
+            # interceptors map this repo's events to this Secret name
+            # (pipelines/triggers/agentic-issue-triggers.yaml).
+            secretName: scm-auth-lightwell-secret
             scopes:
               - api
               - write_repository
@@ -225,10 +241,11 @@ gitlab:
             expiresInDays: 364
       project: []
 
-# Namespace the Tekton pipelines run in. The seeding job writes
-# `scm-auth-secret`, `scm-auth-gitops-secret`, `gitlab-pac-token` and
-# `gitlab-pac-webhook` here, and creates the PaC Repository CR here, so it
-# must match the namespace the pipelines are installed into.
+# Namespace the Tekton pipelines run in. The seeding job writes the
+# per-repo SCM secrets, the per-repo `gitlab-pac-token-<repo>` secrets and
+# the shared `gitlab-pac-webhook` / `gitlab-webhook-secret` here, and
+# creates the PaC Repository CRs here, so it must match the namespace the
+# pipelines are installed into.
 pipeline:
   namespace: tssc-app-ci
 
@@ -248,6 +265,11 @@ vault:
 
 # Whether the PaC pipeline definitions ConfigMap is rendered at all (kept in
 # step with the per-repo `pac` blocks above; the chart-level gate exists so
-# a pac-less install renders no ConfigMap either).
+# a pac-less install renders no ConfigMap either). `issueCommands` gates the
+# seeding job's EventListener half (gitlab-webhook-secret + the Note Hook
+# webhook): without Tekton there is no Route to point at, and an ungated
+# wait would abort the whole seeding. Bootstrap sets it from
+# components.tekton.enabled.
 pac:
   enabled: true
+  issueCommands: true

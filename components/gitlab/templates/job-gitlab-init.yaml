@@ -33,8 +33,13 @@ spec:
         volumeMounts:
           - mountPath: /scripts
             name: init-gitlab-vol
-          - mountPath: /scripts/populate-repo.sh
-            subPath: populate-repo.sh
+          # NOT /scripts/populate-repo.sh: a mountpoint cannot be nested
+          # inside another volume's mount, and /scripts is the read-only
+          # cm-init-gitlab ConfigMap tmpfs -- the runtime cannot create the
+          # mountpoint file inside it and the pod dies in
+          # CreateContainerError ("Not a directory"). Mount the ConfigMap as
+          # a whole sibling directory instead; no subPath needed.
+          - mountPath: /populate-scripts
             name: populate-script-vol
       restartPolicy: Never
       serviceAccount: gitlab
