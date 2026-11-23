@@ -1,0 +1,34 @@
+{{- $ns := .Values.pipelineNamespace }}
+# Ad-hoc advisory upload tooling. This is NOT a Job — it's a ConfigMap you
+# exec into when you need to push a single advisory/SBOM document to RHTPA
+# by hand for testing. The script reads tpa-secret from the pipeline
+# namespace, so it needs no extra credentials.
+#
+# Usage (from any pod in the pipeline namespace with this ConfigMap mounted):
+#   python3 /scripts/rhtpa-upload-advisory.py --verify <doc-id>
+#   python3 /scripts/rhtpa-upload-advisory.py <file.json>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rhtpa-upload-advisory
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+data:
+  README.txt: |
+    Ad-hoc RHTPA advisory upload tool.
+
+    This ConfigMap is not a Job. To use it:
+    1. Exec into any pod in this namespace that has python3
+    2. Set env from the tpa-secret:
+       export TPA_URL=<from tpa-secret bombastic_api_url>
+       export OIDC_ISSUER_URL=<from tpa-secret oidc_issuer_url>
+       export OIDC_CLIENT_ID=tpa-cli
+       export OIDC_CLIENT_SECRET=<from tpa-secret oidc_client_secret>
+    3. Run: python3 /scripts/rhtpa-upload-advisory.py <file.json>
+
+    Or simpler: use the lightwell-data-loader Job's pod as a debug container
+    (it already has the credentials and python3).

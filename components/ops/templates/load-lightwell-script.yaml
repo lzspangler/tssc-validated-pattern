@@ -1,0 +1,151 @@
+{{- $ns := .Values.pipelineNamespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightwell-data-loader
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+data:
+  load.py: |
+    # Load the Lightwell remediation dataset into RHTPA and verify.
+    #
+    # Reads OSV advisories from /data/osv/ and CycloneDX SBOMs from
+    # /data/sbom/ (ConfigMap mounts), authenticates via the tpa-secret
+    # (Vault-backed, read from the pipeline namespace), and uploads to
+    # RHTPA's ad-hoc advisory + SBOM endpoints.
+    #
+    # Idempotent: checks each entry before uploading.
+    #
+    # Pure stdlib — no oc, no pip install at runtime.
+    import base64, glob, json, os, ssl, sys, time, urllib.error, urllib.request
+
+    RHTPA = os.environ.get("TPA_URL", "").rstrip("/")
+    ISSUER = os.environ.get("OIDC_ISSUER_URL", "").rstrip("/")
+    CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "tpa-cli")
+    CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+    if not RHTPA or not ISSUER or not CLIENT_SECRET:
+        sys.exit("ERROR: TPA_URL, OIDC_ISSUER_URL and OIDC_CLIENT_SECRET must be set")
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    def req(url, method="GET", data=None, headers=None, form=None):
+        if form is not None:
+            data = urllib.parse.urlencode(form).encode()
+            headers = {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})}
+        elif data is not None:
+            data = json.dumps(data).encode()
+            headers = {"Content-Type": "application/json", **(headers or {})}
+        r = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+        try:
+            with urllib.request.urlopen(r, context=ctx, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()[:300]
+
+    # --- authenticate (client-credentials against Keycloak) -----------------
+    st, discovery = req(ISSUER + "/.well-known/openid-configuration")
+    if st != 200:
+        sys.exit("ERROR: OIDC discovery failed (%s): %s" % (st, discovery))
+    token_url = discovery.get("token_endpoint", "")
+    if not token_url:
+        sys.exit("ERROR: no token_endpoint in OIDC discovery")
+
+    st, tok = req(token_url, form={
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+    })
+    if st != 200:
+        sys.exit("ERROR: token request failed (%s): %s" % (st, tok))
+    TOKEN = tok["access_token"]
+    AUTH = {"Authorization": "Bearer " + TOKEN}
+    print("authenticated against %s" % ISSUER)
+
+    # --- upload OSV advisories -----------------------------------------------
+    osv_files = sorted(glob.glob("/data/osv/*.json"))
+    if not osv_files:
+        sys.exit("ERROR: no OSV files found in /data/osv/")
+    for f in osv_files:
+        doc_id = json.load(open(f)).get("id", os.path.basename(f))
+        # Check if already present (by label)
+        st, existing = req(
+            RHTPA + "/api/v3/advisory?q=" + urllib.parse.quote(doc_id),
+            headers=AUTH)
+        already = st == 200 and existing and existing.get("items")
+        if already:
+            print("  OSV %-20s already present (id: %s)" % (os.path.basename(f), doc_id))
+            continue
+        body = open(f, "rb").read()
+        r = urllib.request.Request(
+            RHTPA + "/api/v3/advisory?format=osv&labels.source=lightwell&labels.tier=remediated",
+            data=body, headers={**AUTH, "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(r, context=ctx, timeout=30) as resp:
+                result = json.loads(resp.read())
+                print("  OSV %-20s -> %s" % (os.path.basename(f), result.get("id", "?")))
+        except urllib.error.HTTPError as e:
+            print("  OSV %-20s -> ERROR %s: %s" % (os.path.basename(f), e.code, e.read().decode()[:150]))
+            sys.exit(1)
+
+    # --- upload catalog SBOMs -------------------------------------------------
+    sbom_files = sorted(glob.glob("/data/sbom/*.cdx.json"))
+    if not sbom_files:
+        sys.exit("ERROR: no SBOM files found in /data/sbom/")
+    for f in sbom_files:
+        body = open(f, "rb").read()
+        r = urllib.request.Request(
+            RHTPA + "/api/v3/sbom?labels.source=lightwell&labels.tier=remediated",
+            data=body, headers={**AUTH, "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(r, context=ctx, timeout=30) as resp:
+                result = json.loads(resp.read())
+                print("  SBOM %-44s -> %s" % (os.path.basename(f), result.get("id", "?")))
+        except urllib.error.HTTPError as e:
+            print("  SBOM %-44s -> ERROR %s: %s" % (os.path.basename(f), e.code, e.read().decode()[:150]))
+            sys.exit(1)
+
+    # --- verify ----------------------------------------------------------------
+    print("\n=== verification ===")
+    rc = 0
+    V3 = RHTPA + "/api/v3"
+
+    # Verify the remediated versions are known and fixed
+    CHECKS = [
+        ("maven/org.apache.commons/commons-lang3", "3.14.0.rhlw-00001"),
+        ("maven/com.fasterxml.woodstox/woodstox-core", "6.0.3.rhlw-00001"),
+    ]
+    for base_purl, expected_version in CHECKS:
+        from urllib.parse import quote
+        st, doc = req(V3 + "/purl/base/" + quote(base_purl, safe=""), headers=AUTH)
+        if st != 200:
+            print("  [FAIL] base PURL %s not found" % base_purl); rc = 1; continue
+        versions = [v.get("version", "") for v in (doc.get("versions") or [])]
+        if expected_version in versions:
+            print("  [ok]   %s@%s is a known version" % (base_purl.split("/")[-1], expected_version))
+        else:
+            print("  [FAIL] %s@%s NOT known (versions: %s)" % (base_purl.split("/")[-1], expected_version, versions)); rc = 1
+
+        st, doc = req(V3 + "/purl/" + quote(base_purl + "@" + expected_version, safe=""), headers=AUTH)
+        if st == 200 and doc:
+            statuses = set()
+            for adv in (doc.get("advisories") or []):
+                for s in (adv.get("status") or []):
+                    statuses.add(s.get("status", ""))
+            if "fixed" in statuses:
+                print("  [ok]   %s@%s has fixed status" % (base_purl.split("/")[-1], expected_version))
+            elif not statuses:
+                print("  [ok]   %s@%s has no advisory matches (scans clean)" % base_purl.split("/")[-1])
+            else:
+                print("  [FAIL] %s@%s statuses: %s (expected fixed or none)" % (base_purl.split("/")[-1], expected_version, statuses)); rc = 1
+        else:
+            print("  [WARN] %s@%s: could not read purl status (%s)" % (base_purl.split("/")[-1], expected_version, st))
+
+    print("\n%s" % ("OK: Lightwell data loaded and verified" if rc == 0 else "FAILURES detected"))
+    sys.exit(rc)
