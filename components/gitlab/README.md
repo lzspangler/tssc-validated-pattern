@@ -27,12 +27,19 @@ runs it once GitLab is up. In order:
    `open-cve-issues` files land on a readable board instead of auto-creating
    grey labels.
 7. Commits the `.tekton/` Pipelines-as-Code definitions into the
-   application repository and creates the PaC `Repository` CR — PaC creates
-   the GitLab webhooks itself. (Previously:
-   `/remediate` issue comment into a PipelineRun — subscribed to `note_events`
-   and nothing else. `push_events` defaults to true on a new hook and has to
-   be switched off explicitly, or every push also fires the remediation
-   trigger.
+   application repository and creates the PaC `Repository` CR — then
+   registers **both** GitLab webhooks itself (PaC does not reliably create
+   its own on this GitLab version):
+   * the **PaC webhook** (push + merge-request + note events) against the
+     PaC controller Route, carrying the `gitlab-pac-webhook` token;
+   * the **issue-comment webhook** (Note Hooks only — `push_events` and
+     `merge_requests_events` are set false explicitly on every create and
+     update, so no push or MR event ever reaches the EventListener)
+     against the `agentic-issue-commands` EventListener Route
+     (`pipelines/triggers/`), carrying the `gitlab-webhook-secret` token.
+     This is the only path by which a `/remediate` or `/generate-tests-*`
+     comment on an **issue** starts a pipeline — PaC matches push, MR and
+     MR-comment events only.
 8. Mints a **project** access token and writes it into the pipeline namespace
    as `scm-auth-secret`.
 
@@ -44,10 +51,13 @@ cluster all of that was done by hand.
 
 No token in this chart is committed, and none is templated into git.
 
-* **`gitlab-pac-token`** / **`gitlab-pac-webhook`** (pipeline namespace) are the
-  shared secret the Tekton GitLab interceptor validates `X-Gitlab-Token`
-  against. The Job reuses the Secret if it already exists, and otherwise
-  generates one — so PaC and GitLab always agree, and
+* **`gitlab-pac-token`** (pipeline namespace) is the project access token
+  PaC reads the repository and posts statuses with; **`gitlab-pac-webhook`**
+  is the shared secret PaC validates the webhook `X-Gitlab-Token` against
+  (matched to the Repository CR's `webhook_secret`), and
+  **`gitlab-webhook-secret`** is the equivalent for the EventListener's
+  gitlab interceptor. The Job reuses each Secret if it already exists, and
+  otherwise generates one — so consumers and GitLab always agree, and
   re-running the Job does not invalidate a webhook already in use.
 * **`scm-auth-secret`** (pipeline namespace, keys `username`/`token`) is a
   GitLab project access token scoped to the one application repository, at

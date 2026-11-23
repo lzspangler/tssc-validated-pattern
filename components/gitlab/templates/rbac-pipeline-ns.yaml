@@ -30,6 +30,11 @@ rules:
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns"]
     verbs: ["get", "list", "create"]
+  # The seeding Job reads the agentic-issue-commands EventListener Route
+  # here to build the issue-comment webhook URL it registers in GitLab.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

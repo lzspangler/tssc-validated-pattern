@@ -112,9 +112,12 @@ gitlab:
           # mints a project access token for PaC (gitlab-pac-token), commits
           # the .tekton/ PipelineRun definitions (rendered per cluster from
           # templates/cm-pac-pipelines.yaml) into the default branch, and
-          # creates the Repository CR in the pipeline namespace. PaC itself
-          # creates and validates the GitLab webhooks -- there is no
-          # EventListener anywhere -- PaC owns the webhooks.
+          # creates the Repository CR in the pipeline namespace. It also
+          # registers BOTH GitLab webhooks: the PaC webhook (push / MR
+          # events, which PaC does not reliably create itself) and the
+          # issue-comment webhook pointing at the agentic-issue-commands
+          # EventListener (pipelines/triggers/), the only consumer that can
+          # match /remediate and /generate-tests-* on ISSUES.
           pac:
             enabled: true
             tokenName: ssc-demo-pac

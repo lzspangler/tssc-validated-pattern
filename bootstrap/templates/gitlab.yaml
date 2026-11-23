@@ -5,15 +5,17 @@
 #   * creates the application and gitops repositories from files in THIS repo
 #   * mints the two project access tokens the pipelines push with
 #     (scm-auth-secret, scm-auth-gitops-secret)
-#   * mints the PaC token (gitlab-pac-token) Pipelines-as-Code uses both to
-#     watch the application repo and to create its webhooks
+#   * mints the PaC token (gitlab-pac-token) Pipelines-as-Code uses to
+#     watch the application repo
 #   * commits the .tekton/ PaC PipelineRuns into the application repo
 #   * creates the PaC Repository CR in the pipeline namespace
+#   * registers BOTH webhooks per application repository: the PaC webhook
+#     (push / MR events) and the issue-comment webhook pointing at the
+#     agentic-issue-commands EventListener (see tekton-triggers.yaml), which
+#     handles the /remediate and /generate-tests-* slash commands
 #
 # The root password is NOT a value: the deployment sources it from the
 # tssc-gitlab-root-password Secret, which ESO materializes from Vault.
-#
-# There is no EventListener webhook any more -- PaC owns the webhooks.
 # -----------------------------------------------------------------------------
 ---
 apiVersion: argoproj.io/v1alpha1

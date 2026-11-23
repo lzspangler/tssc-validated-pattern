@@ -1,17 +1,25 @@
 {{- $root := . }}
 {{- $host := include "gitlab.host" . }}
 {{- $pipelineNs := .Values.pipeline.namespace }}
+{{- $pacUrl := "" }}
+{{- if .Values.cluster.subdomain }}
+{{- $pacUrl = printf "https://pipelines-as-code-controller-openshift-pipelines.%s" .Values.cluster.subdomain }}
+{{- end }}
 # -----------------------------------------------------------------------------
 # GitLab seeding playbook, run once by job-gitlab-init.
 #
 # Adapted from redhat-ads-tech/ocp-app-platform-demo-helm v1.4.2. Removed:
-# the DevSpaces OAuth application, and the EventListener webhooks (CI
-# triggering is Pipelines-as-Code now). Added: per-repository labels, a
+# the DevSpaces OAuth application. Added: per-repository labels, a
 # project access token written into the pipeline namespace, the imported
 # gitops repository with its own token, the Quay retarget of that
-# repository's chart, and the PaC wiring -- a project token for PaC, the
+# repository's chart, the PaC wiring -- a project token for PaC, the
 # .tekton/ PipelineRun definitions committed into the application repo, and
-# the Repository CR that points PaC at it.
+# the Repository CR that points PaC at it -- and BOTH GitLab webhooks per
+# application repository: the PaC webhook (push / MR events, which PaC does
+# not reliably create itself) and the issue-comment webhook pointing at the
+# agentic-issue-commands EventListener (pipelines/triggers/), which is the
+# only consumer that can match the /remediate and /generate-tests-* slash
+# commands on issues.
 #
 # Everything is written to be re-runnable: the Job has backoffLimit 100 and
 # Argo CD will re-sync it, so every call either tolerates the "already exists"
@@ -32,6 +40,10 @@ data:
         gitlab_namespace: {{ $.Release.Namespace }}
         pipeline_namespace: {{ $pipelineNs }}
         gitlab_host: {{ $host }}
+        # The PaC controller Route (in openshift-pipelines). Empty when a
+        # custom gitlab.host is set without cluster.subdomain -- the PaC
+        # webhook tasks skip themselves in that case.
+        pac_webhook_url: {{ $pacUrl | quote }}
         user_create: true
       tasks:
         - name: Wait for GitLab pod to be ready
@@ -583,6 +595,197 @@ data:
                   webhook_secret:
                     name: gitlab-pac-webhook
                     key: webhook-secret
+
+        # ---- webhooks: PaC (push / MR) + EventListener (issue comments) ------
+        # TWO webhooks per application repository, because no single consumer
+        # understands every event:
+        #
+        #   1. The PaC webhook (push + merge-request + note events) points at
+        #      the PaC controller Route and carries the gitlab-pac-webhook
+        #      token, so PaC can validate it against the Repository CR's
+        #      webhook_secret. PaC is *supposed* to create this webhook
+        #      itself from the Repository CR, but does not reliably do so on
+        #      this GitLab version -- so the seeding job creates it up front
+        #      with the root token (PaC's project bot 403s on webhook
+        #      creation for some projects).
+        #   2. The issue-comment webhook (Note Hooks) points at the
+        #      agentic-issue-commands EventListener Route and carries the
+        #      gitlab-webhook-secret token. This is the ONLY way the
+        #      /remediate and /generate-tests-* slash commands on ISSUES can
+        #      start a pipeline: PaC matches push, MR and MR-comment events
+        #      only, never an issue comment.
+        #
+        # note_events on webhook 1 delivers MR comments to PaC; note_events
+        # on webhook 2 delivers both issue and MR comments to the
+        # EventListener, whose cel filters drop everything that is not an
+        # issue comment starting with a command. GitLab masks webhook tokens
+        # on GET, so both hooks are looked up by URL and PUT unconditionally
+        # to keep their token in step with the Secret.
+
+        - name: Look for an existing EventListener webhook secret
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            name: gitlab-webhook-secret
+            namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
+          register: r_el_webhook
+
+        - name: Store the EventListener webhook secret
+          when: >-
+            r_el_webhook.resources | length == 0
+            or r_el_webhook.resources[0].data.secretToken | default('') | length == 0
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: gitlab-webhook-secret
+                namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
+                labels:
+                  app.kubernetes.io/part-of: tssc-validated-pattern
+              type: Opaque
+              stringData:
+                secretToken: '{{ "{{" }} lookup("ansible.builtin.password", "/dev/null", chars=["hexdigits"], length=40) | lower {{ "}}" }}'
+
+        - name: Read the EventListener webhook secret back
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            name: gitlab-webhook-secret
+            namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
+          register: r_el_webhook
+
+        # Re-read: the earlier r_pac_webhook registration predates the
+        # "Store the PaC webhook secret" task, so on a first run it is empty.
+        - name: Read the PaC webhook secret back
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            name: gitlab-pac-webhook
+            namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
+          register: r_pac_webhook
+
+        - name: Wait for the EventListener Route on {{ $repo.name }}
+          kubernetes.core.k8s_info:
+            api_version: route.openshift.io/v1
+            kind: Route
+            name: agentic-issue-commands
+            namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
+          register: r_el_route
+          retries: 30
+          delay: 10
+          until:
+            - r_el_route.resources | length > 0
+            - r_el_route.resources[0].spec.host | default('') | length > 0
+
+        - name: List webhooks on {{ $repo.name }}
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/hooks
+            method: GET
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code: 200
+          register: r_project_hooks
+
+        - name: Create the PaC webhook on {{ $repo.name }}
+          when: >-
+            pac_webhook_url | length > 0
+            and (r_project_hooks.json | selectattr('url', 'equalto', pac_webhook_url) | list | length == 0)
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/hooks
+            method: POST
+            body_format: json
+            body:
+              url: '{{ "{{" }} pac_webhook_url {{ "}}" }}'
+              token: '{{ "{{" }} r_pac_webhook.resources[0].data["webhook-secret"] | b64decode {{ "}}" }}'
+              push_events: true
+              merge_requests_events: true
+              # note events carry MR comments (the /generate-tests-* MR
+              # commands); PaC ignores the issue comments that also arrive.
+              note_events: true
+              enable_ssl_verification: false
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 201
+          retries: 10
+          delay: 5
+          register: r_pac_hook
+          until: r_pac_hook.status == 201 or r_pac_hook is skipped
+
+        - name: Refresh the PaC webhook on {{ $repo.name }}
+          when: >-
+            pac_webhook_url | length > 0
+            and (r_project_hooks.json | selectattr('url', 'equalto', pac_webhook_url) | list | length > 0)
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/hooks/{{ "{{" }} (r_project_hooks.json | selectattr('url', 'equalto', pac_webhook_url) | list)[0].id {{ "}}" }}
+            method: PUT
+            body_format: json
+            body:
+              url: '{{ "{{" }} pac_webhook_url {{ "}}" }}'
+              token: '{{ "{{" }} r_pac_webhook.resources[0].data["webhook-secret"] | b64decode {{ "}}" }}'
+              push_events: true
+              merge_requests_events: true
+              note_events: true
+              enable_ssl_verification: false
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
+
+        - name: Create the issue-comment webhook on {{ $repo.name }}
+          vars:
+            el_url: '{{ "{{" }} "https://" ~ r_el_route.resources[0].spec.host {{ "}}" }}'
+          when: >-
+            r_project_hooks.json | selectattr('url', 'equalto', el_url) | list | length == 0
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/hooks
+            method: POST
+            body_format: json
+            body:
+              url: '{{ "{{" }} el_url {{ "}}" }}'
+              token: '{{ "{{" }} r_el_webhook.resources[0].data["secretToken"] | b64decode {{ "}}" }}'
+              # Note Hooks only: issue AND MR comments arrive here, and the
+              # EventListener's cel filters keep just the issue commands.
+              note_events: true
+              push_events: false
+              merge_requests_events: false
+              enable_ssl_verification: false
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 201
+          retries: 10
+          delay: 5
+          register: r_el_hook
+          until: r_el_hook.status == 201 or r_el_hook is skipped
+
+        - name: Refresh the issue-comment webhook on {{ $repo.name }}
+          vars:
+            el_url: '{{ "{{" }} "https://" ~ r_el_route.resources[0].spec.host {{ "}}" }}'
+          when: >-
+            r_project_hooks.json | selectattr('url', 'equalto', el_url) | list | length > 0
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/hooks/{{ "{{" }} (r_project_hooks.json | selectattr('url', 'equalto', el_url) | list)[0].id {{ "}}" }}
+            method: PUT
+            body_format: json
+            body:
+              url: '{{ "{{" }} el_url {{ "}}" }}'
+              token: '{{ "{{" }} r_el_webhook.resources[0].data["secretToken"] | b64decode {{ "}}" }}'
+              note_events: true
+              push_events: false
+              merge_requests_events: false
+              enable_ssl_verification: false
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
 {{- end }}
 
 {{- if and $repo.accessToken ($repo.accessToken.enabled | default false) $pipelineNs }}

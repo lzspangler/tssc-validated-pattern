@@ -25,8 +25,12 @@
 #                                      -> agentic-test-generation-unit
 #                                      (TECH PREVIEW: on-comment matching)
 #
-# The agentic CVE analysis / remediation pipelines are NOT PaC-triggered:
-# they are operator-invoked (tkn / orchestrator) -- see the RUNBOOK.
+# The ISSUE-comment slash commands (/remediate, /generate-tests-* on
+# issues) are NOT PaC-triggered -- PaC never matches issue comments. They
+# go through the agentic-issue-commands EventListener
+# (pipelines/triggers/), which the seeding job points a Note Hook webhook
+# at. The CVE analysis pipeline itself is operator-invoked (tkn /
+# orchestrator) -- see the RUNBOOK.
 # -----------------------------------------------------------------------------
 kind: ConfigMap
 metadata:
