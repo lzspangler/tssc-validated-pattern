@@ -72,7 +72,7 @@ one can match:
 | Event | Consumer | Wiring |
 |---|---|---|
 | Push to default branch | Pipelines as Code | `.tekton/push-ci.yaml` committed in the app repo + Repository CR |
-| Merge request | Pipelines as Code | `.tekton/pull-request-verify.yaml` committed in the app repo |
+| Merge request (opened) | — nothing runs | Merge-gating is off; remediation MRs merge without a verify pipeline |
 | MR comment (`/generate-tests-unit`) | Pipelines as Code | `.tekton/generate-tests-comment.yaml` committed in the app repo |
 | **Issue comment** (`/remediate`, `/generate-tests-*`) | **agentic-issue-commands EventListener** | `pipelines/triggers/` + Note Hook webhook |
 
