@@ -33,12 +33,21 @@
 # or permission data for the commenting user (just id/name/username), and
 # cel cannot call the GitLab API -- so the only enforceable check here is
 # a username allowlist. Every filter below requires
-#   body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline']
-# (fail closed: an unknown commenter is rejected, not silently run). If
-# you seed demo users (gitlab.users in the gitlab component), ADD THEM to
-# all four filters -- a missing username is indistinguishable from an
-# unauthorized one, and the symptom of forgetting is exactly "the command
-# did not trigger a pipeline".
+#   body.user.username in ['root'] || body.user.username.startsWith('project_')
+#
+# NOTE on the second clause: a GitLab PROJECT ACCESS TOKEN does not act
+# under its human-readable name ("ssc-demo-pipeline" is the token NAME) --
+# the bot user in the payload is project_<id>_bot_<hash>, and the hash is
+# minted per token creation, so it differs on every install. Matching the
+# project_ prefix is still safe AND durable: a project-bot user is a
+# member of exactly its own project, so any project_* user commenting on
+# this project's issue is necessarily one of THIS project's tokens (all of
+# which the seeding job creates at Maintainer level). Fail closed: an
+# unknown human commenter is rejected, not silently run. If you seed demo
+# users (gitlab.users in the gitlab component), ADD THEM to the ['root']
+# list in all four filters -- a missing username is indistinguishable from
+# an unauthorized one, and the symptom of forgetting is exactly "the
+# command did not trigger a pipeline".
 #
 # ---- per-repository SCM credentials --------------------------------------
 # Each application repository has its OWN project-scoped token Secret in
@@ -622,7 +631,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/remediate')
             - name: overlays
               value:
@@ -733,7 +742,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/generate-tests-unit')
             - name: overlays
               value:
@@ -783,7 +792,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/generate-tests-functional')
             - name: overlays
               value:
@@ -833,7 +842,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/generate-tests-integration')
             - name: overlays
               value:
