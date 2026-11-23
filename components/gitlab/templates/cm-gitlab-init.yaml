@@ -229,6 +229,8 @@ data:
 
 {{- if $repo.source }}
 
+
+
         # Push the application files from the GitOps repo as the initial
         # commit. The seeding Job already cloned this repository (for the
         # PaC workflow definitions); `source` is a repo-relative path under
@@ -237,47 +239,27 @@ data:
         # atomic commit. A project created with no import_url has an empty
         # repository (no branches), so the first file create also creates
         # the default branch.
+        - name: Check if {{ $repo.name }} has any commits
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ $slug }}/repository/commits?per_page=1
+            method: GET
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
+              - 404
+          register: r_repo_commits
+          # 200 with an empty array means the repo has no commits
+
         - name: Populate {{ $repo.name }} from {{ $repo.source }}
-          when: r_import.status == 201
-          ansible.builtin.shell: |
-            set -e
-            SOURCE_DIR="/tmp/repo/{{ $repo.source }}"
-            [ -d "{{ "{{" }} SOURCE_DIR {{ "}}" }}" ] || { echo "ERROR: {{ $repo.source }} not found in the cloned repo"; exit 1; }
-
-            # Build the actions JSON array (one create per file)
-            ACTIONS="["
-            FIRST=true
-            while IFS= read -r -d '' FILE; do
-              REL_PATH="${FILE#{{ "{{" }} SOURCE_DIR {{ "}}" }}/}"
-              CONTENT_B64=$(base64 -w 0 < "{{ "{{" }} FILE {{ "}}" }}")
-              if [ "$FIRST" = true ]; then
-                FIRST=false
-              else
-                ACTIONS+=","
-              fi
-              ACTIONS+="{\"action\":\"create\",\"file_path\":\"${REL_PATH}\",\"encoding\":\"base64\",\"content\":\"${CONTENT_B64}\"}"
-            done < <(find "{{ "{{" }} SOURCE_DIR {{ "}}" }}" -type f -print0)
-            ACTIONS+="]"
-
-            # Count files (for the log)
-            FILE_COUNT=$(echo "{{ "{{" }} ACTIONS {{ "}}" }}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
-            echo "Committing ${FILE_COUNT} files to {{ $repo.name }}"
-
-            # Push as the initial commit via the commits API
-            RESP=$(curl -s --request POST \
-              "https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/commits" \
-              --header "PRIVATE-TOKEN: {{ "{{" }} root_token {{ "}}" }}" \
-              --header "Content-Type: application/json" \
-              --data "{{ "{{" }} ACTIONS | python3 -c 'import json,sys;a=json.load(sys.stdin);print(json.dumps({"branch":"{{ $repo.defaultBranch | default "main" }}","commit_message":"Initial import from tssc-validated-pattern","actions":a}))' {{ "}}" }}")
-            echo "$RESP" | python3 -c '
-            import json,sys
-            r=json.load(sys.stdin)
-            if "id" in r:
-                print("  committed:", r.get("short_id","?"), "on", r.get("branch","?"))
-            else:
-                print("  ERROR:", json.dumps(r)[:200]); sys.exit(1)'
-          args:
-            executable: /bin/bash
+          # GitLab returns 200 with an EMPTY ARRAY for a repo with no
+          # commits (not 404), so check the body, not the status code.
+          when: r_import.status == 201 or (r_repo_commits.json | default([]) | length) == 0
+          ansible.builtin.shell: /bin/bash /scripts/populate-repo.sh '{{ $repo.source }}' '{{ $slug }}' '{{ $repo.defaultBranch | default "main" }}'
+          environment:
+            GITLAB_TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            GITLAB_HOST: '{{ $host }}'
 {{- end }}
 
 {{- if ne ($repo.defaultBranch | default "main") "main" }}

@@ -33,9 +33,16 @@ spec:
         volumeMounts:
           - mountPath: /scripts
             name: init-gitlab-vol
+          - mountPath: /scripts/populate-repo.sh
+            subPath: populate-repo.sh
+            name: populate-script-vol
       restartPolicy: Never
       serviceAccount: gitlab
       volumes:
       - name: init-gitlab-vol
         configMap:
           name: cm-init-gitlab
+      - name: populate-script-vol
+        configMap:
+          name: populate-repo-script
+          defaultMode: 0755

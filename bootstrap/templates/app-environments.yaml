@@ -49,6 +49,7 @@ spec:
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" (printf "lightwell-java-demo-%s" $env.name) "namespace" $.Values.argocd.namespace "syncWave" $.Values.components.appEnvironments.syncWave "root" $) }}
 spec:
   project: {{ $.Values.argocd.project }}
   source:
@@ -63,6 +64,5 @@ spec:
     server: https://kubernetes.default.svc
     namespace: {{ $env.namespace }}
   {{- include "bootstrap.syncPolicy" $ | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" (printf "lightwell-java-demo-%s" $env.name) "namespace" $.Values.argocd.namespace "syncWave" $.Values.components.appEnvironments.syncWave "root" $) }}
 {{- end }}
 {{- end }}
