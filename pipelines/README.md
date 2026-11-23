@@ -264,8 +264,8 @@ out. Every task runs unconditionally except `verify-commit` (optional) and
 | *(none)* | There is no `triggers/` directory: CI triggering is **Pipelines as Code**. The `.tekton/` PipelineRuns live in the application repository (committed by the GitLab seeding job from `components/gitlab/templates/cm-pac-pipelines.yaml`), and a PaC `Repository` CR in the pipeline namespace points PaC at the repo — PaC creates the GitLab webhooks itself. |
 | `config/ai-agent-config.yaml` | ConfigMap — the single AI backend switch (provider/model/region/effort) |
 | `config/rhtpa-enable-importers-job.yaml` | Job — idempotently enables + forces the RHTPA Red Hat SBOM/CSAF importers |
-| `components/ops (the `rhtpa-upload-advisory` ConfigMap)` | Script — uploads/verifies/deletes a **single** advisory document (OSV/CSAF/…) in RHTPA, for records no importer covers |
-| `ops/rhtpa-load-lightwell-data.sh` | Script — loads **the whole Lightwell remediation dataset** (`data/osv/` + `data/sbom/`) into RHTPA and verifies it; `--verify` / `--purge` |
+| `components/ops` | Job — loads the Lightwell remediation dataset into RHTPA and verifies it; ConfigMap — ad-hoc single-document upload tool |
+
 | `ops/ai-agent-image-prewarm-daemonset.yaml` | DaemonSet — pre-pulls the large agent image onto every node so steps can't flake on ImagePullBackOff |
 | `data/osv/LW-DEMO-001*.json` | OSV advisories — one per CVE, each declaring the Lightwell `.rhlw-00001` backport as the `fixed` version (see [Lightwell remediation data](#lightwell-remediation-data)) |
 | `data/sbom/*.cdx.json` | One-component CycloneDX catalog SBOMs — their only job is to make each `.rhlw-00001` build a *known version* of its base PURL, so the fix-version scan can offer it |
@@ -1038,16 +1038,17 @@ The importers above are bulk feeds bound to remote **sources** — `osv-github`
 clones a git repository, `cve` the CVE List repo. None of them will pick up one
 hand-written demo record, and a flat HTTP directory of OSV JSON (an Artifactory
 generic repo, say) is **not** a valid importer source. For one-off documents use
-the ad-hoc upload endpoint instead, via `components/ops (the `rhtpa-upload-advisory` ConfigMap)`:
+the ad-hoc upload endpoint instead, via the upload script in the `rhtpa-upload-advisory` ConfigMap (`components/ops`):
 
 ```sh
-components/ops (the `rhtpa-upload-advisory` ConfigMap) -l source=lightwell data/osv/LW-DEMO-0012.json
-components/ops (the `rhtpa-upload-advisory` ConfigMap) --verify LW-DEMO-0012     # what's ingested, all versions
-components/ops (the `rhtpa-upload-advisory` ConfigMap) --delete <uuid>           # delete + wait for it to land
+# Exec into the rhtpa-load-lightwell-data Job's pod (or any pod with the
+# ConfigMap mounted at /scripts and the ops-tpa-credentials Secret's env):
+python3 /scripts/upload_advisory.py data/osv/LW-DEMO-0012.json
+python3 /scripts/upload_advisory.py --verify LW-DEMO-0012
 ```
 
 (To load the whole Lightwell dataset rather than one record, use
-`ops/rhtpa-load-lightwell-data.sh` — see
+the `rhtpa-load-lightwell-data` Job in `components/ops` — see
 [Lightwell remediation data](#lightwell-remediation-data) below.)
 
 It reads `tpa-secret` from `-n/--namespace` (default `tssc-app-ci`), mints the
@@ -1101,9 +1102,10 @@ and each needs its own piece of data:
 Load and verify both halves with one command:
 
 ```sh
-ops/rhtpa-load-lightwell-data.sh            # load, then verify
-ops/rhtpa-load-lightwell-data.sh --verify   # verify only, change nothing
-ops/rhtpa-load-lightwell-data.sh --purge    # delete what a previous load created
+oc -n tssc-app-ci logs job/rhtpa-load-lightwell-data   # the Job loads and verifies automatically
+# The Job is idempotent (re-running skips existing entries).
+# To verify only: check the Job's log for [ok]/[FAIL] lines.
+# To purge: delete the entries via the RHTPA REST API (see components/ops).
 ```
 
 `--verify` prints, per remediated PURL, the base PURL's known versions (goal 1)
