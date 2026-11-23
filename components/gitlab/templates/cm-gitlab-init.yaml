@@ -268,7 +268,7 @@ data:
           # GitLab returns 200 with an EMPTY ARRAY for a repo with no
           # commits (not 404), so check the body, not the status code.
           when: r_import.status == 201 or (r_repo_commits.json | default([]) | length) == 0
-          ansible.builtin.shell: /bin/bash /scripts/populate-repo.sh '{{ $repo.source }}' '{{ $slug }}' '{{ $repo.defaultBranch | default "main" }}'
+          ansible.builtin.shell: /bin/bash /populate-scripts/populate-repo.sh '{{ $repo.source }}' '{{ $slug }}' '{{ $repo.defaultBranch | default "main" }}'
           environment:
             GITLAB_TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
             GITLAB_HOST: '{{ $host }}'
