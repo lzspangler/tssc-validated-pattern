@@ -38,9 +38,14 @@ data:
             data=json.dumps(body).encode() if body is not None else None,
             headers={"Authorization": "Bearer " + token, "Accept": "application/json",
                      **({"Content-Type": ctype} if body is not None else {})})
-        with urllib.request.urlopen(req, context=ctx) as r:
-            raw = r.read()
-            return r.status, (json.loads(raw) if raw else None)
+        # urllib raises HTTPError for 4xx/5xx instead of returning the code;
+        # the create-or-update flow below depends on seeing 404 from the PUT.
+        try:
+            with urllib.request.urlopen(req, context=ctx) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()[:300]
 
     # Read the admin password (bootstrap.creds format: admin@*=<password>).
     code, secret = call("/api/v1/namespaces/%s/secrets/artifactory-admin" % NS)

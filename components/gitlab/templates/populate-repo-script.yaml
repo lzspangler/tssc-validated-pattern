@@ -50,12 +50,15 @@ data:
     FILE_COUNT=$(printf '%s' "${ACTIONS}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
     echo "Committing ${FILE_COUNT} files to ${PROJECT_SLUG} on ${BRANCH}"
 
-    # Push as the initial commit via the commits API
-    RESP=$(curl -s --request POST \
+    # Push as the initial commit via the commits API. The body is piped on
+    # stdin: a populated application repo is megabytes of base64, which
+    # exceeds the kernel argv limit when passed as a curl argument
+    # ("Argument list too long") and kills the seeding on fresh installs.
+    RESP=$(printf '%s' "${BODY}" | curl -s --request POST \
       "https://${GITLAB_HOST}/api/v4/projects/${PROJECT_SLUG}/repository/commits" \
       --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
       --header "Content-Type: application/json" \
-      --data "${BODY}")
+      --data @-)
 
     echo "${RESP}" | python3 -c '
     import json,sys
