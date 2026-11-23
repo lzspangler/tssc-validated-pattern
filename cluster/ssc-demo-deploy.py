@@ -483,6 +483,7 @@ class Deployment:
         self.ns = config["pipelineNamespace"]
         require(self.ns == "tssc-app-ci", "The current runbook's Tekton RBAC requires pipelineNamespace=tssc-app-ci; reconcile RBAC before using another namespace")
         self.components = config["components"]
+        coordinator_overrides = self.coordinator_helm_overrides()
         require(self.components["tekton"]["enabled"] and self.components["pipelines"]["enabled"],
                 "This full-demo coordinator requires the existing Pipelines and Tekton components")
         af = config.get("deployment", {}).get("artifactory", {})
@@ -491,16 +492,12 @@ class Deployment:
         require(all(re.fullmatch(r"[a-fA-F0-9]+", af[key]) and len(af[key]) in (32, 64) for key in ("masterKey", "joinKey")),
                 "Artifactory masterKey/joinKey must be 32- or 64-character hex strings")
         orchestrator_opt_in = self.override.get("components", {}).get("orchestrator", {}).get("enabled") is True
-        if not orchestrator_opt_in:
-            # Do not inherit an enabled Orchestrator from a remote source by default.
-            self.config["components"]["orchestrator"]["enabled"] = False
         if self.components["orchestrator"]["enabled"]:
             for filename in ("remediate_and_promote_gitlab.json", "remediate_next_gitlab.json"):
                 require((source / "orchestration" / filename).is_file(),
                         f"Orchestrator is enabled but source lacks orchestration/{filename}; supply the workflow source or explicitly disable the component")
         helm_command = ["helm", "template", "ssc", str(chart), "-f", str(self.values)]
-        if not orchestrator_opt_in:
-            helm_command.extend(["--set", "components.orchestrator.enabled=false"])
+        helm_command.extend(coordinator_overrides)
         rendered = run(helm_command, timeout=120)
         self.apps = [doc for doc in yaml.safe_load_all(rendered) if doc]
         require(self.apps and all(isinstance(doc, dict) and doc.get("kind") == "Application" for doc in self.apps), "Bootstrap must render only Argo CD Applications")
@@ -531,6 +528,18 @@ class Deployment:
             "artifactory-keys": {"master-key": af["masterKey"], "join-key": af["joinKey"]},
             "artifactory-postgresql": {"postgres-password": af["postgresPassword"], "password": af["appPassword"]},
         }
+
+    def coordinator_helm_overrides(self):
+        private_components = self.override.get("components", {})
+        args = []
+        if private_components.get("orchestrator", {}).get("enabled") is not True:
+            self.components["orchestrator"]["enabled"] = False
+            args.extend(["--set", "components.orchestrator.enabled=false"])
+        prerequisites = self.components["rhtpaPrerequisites"]
+        if prerequisites["enabled"] and "caConfigMap" not in private_components.get("rhtpaPrerequisites", {}):
+            prerequisites["caConfigMap"] = "ssc-router-ca"
+            args.extend(["--set", "components.rhtpaPrerequisites.caConfigMap=ssc-router-ca"])
+        return args
 
     def show_plan(self):
         print("Plan only: no cluster access, remote-source verification, or resource changes.")

@@ -286,7 +286,9 @@ components:
     enabled: true
     namespace: trusted-profile-analyzer
     syncWave: "10"
-    caConfigMap: ssc-router-ca
+    # Empty preserves the manual path on public-trust clusters. The coordinator
+    # supplies its ConfigMap explicitly; manual private-CA installs may opt in.
+    caConfigMap: ""
 
   # RHTPA 3.x via the operator. MUTUALLY EXCLUSIVE with `rhtpa` below -- both
   # publish the same Route and own the same Deployments, so bootstrap-infra

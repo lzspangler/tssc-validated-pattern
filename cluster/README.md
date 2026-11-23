@@ -186,6 +186,13 @@ verification stays enabled.
 Workstation `/etc/hosts` entries affect only workstation route resolution and do
 not propagate into pods.
 
+The manual Helm path defaults `rhtpaPrerequisites.caConfigMap` to empty, so its
+Keycloak hook does not require a ConfigMap on clusters with publicly trusted
+ingress. A manual private-CA deployment must create a ConfigMap containing
+`ca-bundle.crt` in the RHTPA namespace and set
+`components.rhtpaPrerequisites.caConfigMap` to its name. The coordinator sets
+this value explicitly when it creates/reuses its ingress CA ConfigMap.
+
 Artifactory is prepared and awaited first, excluding placeholder Secret stubs.
 Then bootstrap Applications are created/reused one at a time in configured
 sync-wave order, waiting for each Argo sync operation to finish before starting

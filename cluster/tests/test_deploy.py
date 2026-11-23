@@ -76,6 +76,28 @@ class DeploymentSafetyTests(unittest.TestCase):
                     operation = json.loads(self.instance.oc.call_args.args[-1])["operation"]
                     self.assertEqual(operation["sync"], {"revision": "fixed-revision", "prune": False})
 
+    def test_manual_chart_keeps_rhtpa_ca_mount_opt_in(self):
+        values = deploy.load_yaml(ROOT / "automation/gitops/bootstrap-infra/values.yaml")
+        self.assertEqual(values["components"]["rhtpaPrerequisites"]["caConfigMap"], "")
+
+    def test_coordinator_explicitly_supplies_ca_configmap_and_disables_orchestrator(self):
+        self.instance.override = {}
+        self.instance.components = {"orchestrator": {"enabled": True},
+                                    "rhtpaPrerequisites": {"enabled": True, "caConfigMap": ""}}
+        args = self.instance.coordinator_helm_overrides()
+        self.assertEqual(self.instance.components["orchestrator"]["enabled"], False)
+        self.assertEqual(self.instance.components["rhtpaPrerequisites"]["caConfigMap"], "ssc-router-ca")
+        self.assertEqual(args, ["--set", "components.orchestrator.enabled=false",
+                                "--set", "components.rhtpaPrerequisites.caConfigMap=ssc-router-ca"])
+
+        self.instance.override = {"components": {
+            "orchestrator": {"enabled": True},
+            "rhtpaPrerequisites": {"caConfigMap": "private-router-ca"}}}
+        self.instance.components = {"orchestrator": {"enabled": True},
+                                    "rhtpaPrerequisites": {"enabled": True, "caConfigMap": "private-router-ca"}}
+        self.assertEqual(self.instance.coordinator_helm_overrides(), [])
+        self.assertEqual(self.instance.components["rhtpaPrerequisites"]["caConfigMap"], "private-router-ca")
+
     def test_pending_retry_does_not_fail_on_old_operation_status(self):
         app = {"metadata": {"name": "demo", "namespace": "argo"}, "spec": {}}
         states = [{"operation": {"sync": {}}, "status": {"operationState": {"phase": "Failed"}}},

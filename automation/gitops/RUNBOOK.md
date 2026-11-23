@@ -376,6 +376,21 @@ components:
     storageClassName: gp3-csi # a BLOCK class, not the demo's general-purpose one
 ```
 
+The manual-path default leaves `components.rhtpaPrerequisites.caConfigMap` empty,
+so the Keycloak wait hook does not mount an optional CA ConfigMap on clusters
+whose ingress certificate is already trusted. For a private ingress CA, create
+a ConfigMap containing the public certificate at key `ca-bundle.crt` in the RHTPA
+namespace, then opt in:
+
+```yaml
+components:
+  rhtpaPrerequisites:
+    caConfigMap: ssc-router-ca
+```
+
+The manual path does not create this ConfigMap. The optional deployment
+coordinator creates/reuses it and passes the setting to the chart automatically.
+
 **Keep this mode-600 file and its mode-700 parent.** `tpaCliClientSecret` is
 needed again in §8; the file preserves all six platform credentials for every
 re-render. Keep the separate Artifactory credentials from §1 equally durable.
