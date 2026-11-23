@@ -251,23 +251,39 @@ data:
         # atomic commit. A project created with no import_url has an empty
         # repository (no branches), so the first file create also creates
         # the default branch.
-        - name: Check if {{ $repo.name }} has any commits
+        # Populate idempotency is decided by CONTENT, not by commit
+        # count: the .tekton/ commits below land on an empty repo's
+        # default branch and make "has any commits" true, which used to
+        # permanently skip the source population for any repo whose
+        # populate failed in an earlier, buggier run (the lightwell repos
+        # sat for a day with nothing but .tekton in them). A repo needs
+        # populating when its root tree holds nothing besides .tekton.
+        # The tree call on a fully EMPTY repo returns 400/404 with a
+        # {"message": ...} mapping -- selectattr('path', 'defined')
+        # filters that out, and the empty result correctly means
+        # "populate".
+        - name: Check if {{ $repo.name }} is populated
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ $slug }}/repository/commits?per_page=1
+            url: https://{{ $host }}/api/v4/projects/{{ $slug }}/repository/tree?ref={{ $repo.defaultBranch | default "main" }}&per_page=100
             method: GET
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
             validate_certs: false
             status_code:
               - 200
+              - 400
               - 404
-          register: r_repo_commits
-          # 200 with an empty array means the repo has no commits
+          register: r_repo_tree
 
         - name: Populate {{ $repo.name }} from {{ $repo.source }}
-          # GitLab returns 200 with an EMPTY ARRAY for a repo with no
-          # commits (not 404), so check the body, not the status code.
-          when: r_import.status == 201 or (r_repo_commits.json | default([]) | length) == 0
+          # Populate unless the root tree already holds non-.tekton
+          # content (see the check task above for why commit count is
+          # the wrong signal).
+          when: >-
+            r_import.status == 201
+            or ((r_repo_tree.json | default([])) | selectattr('path', 'defined')
+                 | map(attribute='path') | reject('search', '^\.tekton')
+                 | list | length) == 0
           ansible.builtin.shell: /bin/bash /populate-scripts/populate-repo.sh '{{ $repo.source }}' '{{ $slug }}' '{{ $repo.defaultBranch | default "main" }}'
           environment:
             GITLAB_TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
@@ -532,9 +548,14 @@ data:
           register: r_pac_configmap
           failed_when: r_pac_configmap.resources | length == 0
 
+        # The ConfigMap keys carry a --<repo-name> suffix (see
+        # cm-pac-pipelines.yaml): filter to THIS repository's definitions
+        # and strip the suffix when building the .tekton/ path, so each
+        # repo gets only its own component config under the plain file
+        # names PaC matches.
         - name: Check the committed .tekton definitions on {{ $repo.name }}
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ item.key) | urlencode | regex_replace('/', '%2F') {{ "}}" }}?ref={{ $branch }}
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ (item.key | regex_replace('--{{ $repo.name }}$', ''))) | urlencode | regex_replace('/', '%2F') {{ "}}" }}?ref={{ $branch }}
             method: GET
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
@@ -544,11 +565,11 @@ data:
               - 404
           register: r_pac_file
           loop: >-
-            {{ "{{" }} r_pac_configmap.resources[0].data | dict2items {{ "}}" }}
+            {{ "{{" }} r_pac_configmap.resources[0].data | dict2items | selectattr('key', 'search', '--{{ $repo.name }}$') | list {{ "}}" }}
 
         - name: Create missing .tekton definitions
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ item.item.key) | urlencode | regex_replace('/', '%2F') {{ "}}" }}
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ (item.item.key | regex_replace('--{{ $repo.name }}$', ''))) | urlencode | regex_replace('/', '%2F') {{ "}}" }}
             method: POST
             body_format: form-urlencoded
             body:
@@ -568,7 +589,7 @@ data:
 
         - name: Update stale .tekton definitions
           ansible.builtin.uri:
-            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ item.item.key) | urlencode | regex_replace('/', '%2F') {{ "}}" }}
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} ('.tekton/' ~ (item.item.key | regex_replace('--{{ $repo.name }}$', ''))) | urlencode | regex_replace('/', '%2F') {{ "}}" }}
             method: PUT
             body_format: form-urlencoded
             body:

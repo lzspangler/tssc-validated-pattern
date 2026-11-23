@@ -3,14 +3,23 @@
 {{- $quay := printf "quay.%s" $subdomain }}
 {{- if and (.Values.pac.enabled | default false) .Values.pipeline.namespace }}
 # -----------------------------------------------------------------------------
-# The .tekton/ PipelineRun definitions, as ConfigMap data keys. NOTE: keys
-# are BASE NAMES ONLY -- a ConfigMap key cannot contain "/" (the API server
-# rejects ".tekton/push-ci.yaml" outright, which is what stalled the gitlab
-# sync on dl265); the seeding playbook prefixes ".tekton/" when it commits
-# them into the repository.
-# repository's default branch. Pipelines-as-Code watches that directory via
-# the Repository CR the same Job creates, and matches runs to events by the
-# annotations below.
+# The .tekton/ PipelineRun definitions, as ConfigMap data keys, rendered
+# PER APPLICATION REPOSITORY. Two key rules:
+#
+#   * A ConfigMap key cannot contain "/" (the API server rejects
+#     ".tekton/push-ci.yaml" outright), so keys are base names only.
+#   * Each key carries a "--<repo-name>" suffix: the seeding playbook
+#     matches the suffix to commit each repository ONLY its own
+#     definitions and strips the suffix when the file lands in .tekton/.
+#     Without per-repo keys, every repo would run the first repo's
+#     component config (a lightwell push built the spring-boot image
+#     under the spring-boot component name).
+#
+# The per-repo values: component-name and output-image take the repository
+# name, and git-auth binds the repository's OWN project-scoped SCM Secret
+# (a GitLab project bot is a member of exactly one project).
+# Pipelines-as-Code watches .tekton/ via the Repository CR the same Job
+# creates, and matches runs to events by the annotations below.
 #
 # PaC template variables -- {{ "{{" }} repo_url {{ "}}" }}, {{ "{{" }} revision {{ "}}" }}, ... -- are
 # escaped so Helm passes them through; the HOSTS are Helm-rendered here,
@@ -23,9 +32,10 @@
 # dies with "invalid map key" -- one bad file aborts the whole event, so no
 # PipelineRun from ANY .tekton file in the repo.
 #
-# Three runs:
-#   .tekton/push-ci.yaml               push to main -> ci-build-publish
-#                                      (build + image + SBOM + dev promotion)
+# Three runs per repository:
+#   .tekton/push-ci.yaml               push to the default branch ->
+#                                      ci-build-publish (build + image +
+#                                      SBOM + dev promotion)
 #   .tekton/pull-request-verify.yaml   MRs -> git-clone + mvn verify, with
 #                                      PaC reporting the status back to the MR
 #   .tekton/generate-tests-comment.yaml /generate-tests-unit comment on an MR
@@ -46,11 +56,22 @@ metadata:
     argocd.argoproj.io/sync-wave: "2"
 apiVersion: v1
 data:
-  push-ci.yaml: |
+{{- range $group := .Values.gitlab.groups }}
+{{- range $repo := $group.repo }}
+{{- if (index $repo "pac" | default dict).enabled }}
+{{- $scm := "scm-auth-secret" }}
+{{- if $repo.accessToken }}{{ $scm = $repo.accessToken.secretName | default "scm-auth-secret" }}{{ end }}
+{{- $branch := $repo.defaultBranch | default "main" }}
+  # Keys carry a --<repo> suffix so the seeding job can commit each
+  # repository ONLY its own definitions (the suffix is stripped when the
+  # file lands in .tekton/). Without this, every repo runs the FIRST
+  # repo's component config -- a lightwell push builds the spring-boot
+  # image under the spring-boot component name.
+  push-ci.yaml--{{ $repo.name }}: |
     ---
-    # CI on merge to main: build, publish the image to Quay, attach + upload
-    # its SBOM to RHTPA, then promote the tag into the gitops repo's dev
-    # values (the pipeline's finally task starts gitops-cd-dev).
+    # CI on merge to {{ $branch }}: build, publish the image to Quay, attach
+    # + upload its SBOM to RHTPA, then promote the tag into the gitops
+    # repo's dev values (the pipeline's finally task starts gitops-cd-dev).
     apiVersion: tekton.dev/v1
     kind: PipelineRun
     metadata:
@@ -62,20 +83,20 @@ data:
       generateName: ci-build-publish-
       annotations:
         pipelinesascode.tekton.dev/on-event: "[push]"
-        pipelinesascode.tekton.dev/on-target-branch: "[main]"
+        pipelinesascode.tekton.dev/on-target-branch: "[{{ $branch }}]"
         pipelinesascode.tekton.dev/max-keep-runs: "3"
     spec:
       pipelineRef:
         name: ci-build-publish
       params:
         - name: component-name
-          value: spring-boot-example-application
+          value: {{ $repo.name }}
         - name: git-url
           value: "{{ "{{" }} repo_url {{ "}}" }}"
         - name: revision
           value: "{{ "{{" }} revision {{ "}}" }}"
         - name: output-image
-          value: "{{ $quay }}/tssc/spring-boot-example-application:{{ "{{" }} revision {{ "}}" }}"
+          value: "{{ $quay }}/tssc/{{ $repo.name }}:{{ "{{" }} revision {{ "}}" }}"
       workspaces:
         - name: workspace
           volumeClaimTemplate:
@@ -89,8 +110,8 @@ data:
             secretName: maven-settings
         - name: git-auth
           secret:
-            secretName: scm-auth-secret
-  pull-request-verify.yaml: |
+            secretName: {{ $scm }}
+  pull-request-verify.yaml--{{ $repo.name }}: |
     ---
     # MR verification: clone the MR head and run the test suite. PaC reports
     # the outcome back to the merge request as a commit status; combined with
@@ -104,7 +125,7 @@ data:
       generateName: pull-request-verify-
       annotations:
         pipelinesascode.tekton.dev/on-event: "[pull_request]"
-        pipelinesascode.tekton.dev/on-target-branch: "[main]"
+        pipelinesascode.tekton.dev/on-target-branch: "[{{ $branch }}]"
         pipelinesascode.tekton.dev/max-keep-runs: "3"
     spec:
       params:
@@ -161,8 +182,8 @@ data:
             secretName: maven-settings
         - name: git-auth
           secret:
-            secretName: scm-auth-secret
-  generate-tests-comment.yaml: |
+            secretName: {{ $scm }}
+  generate-tests-comment.yaml--{{ $repo.name }}: |
     ---
     # TECH PREVIEW (PaC on-comment matching): commenting /generate-tests-unit
     # on an open merge request generates unit tests for the MR's source
@@ -175,7 +196,7 @@ data:
       generateName: generate-tests-unit-
       annotations:
         pipelinesascode.tekton.dev/on-event: "[pull_request_comment]"
-        pipelinesascode.tekton.dev/on-target-branch: "[main]"
+        pipelinesascode.tekton.dev/on-target-branch: "[{{ $branch }}]"
         pipelinesascode.tekton.dev/on-comment: "^/generate-tests-unit"
     spec:
       pipelineRef:
@@ -204,5 +225,8 @@ data:
             secretName: maven-settings
         - name: git-auth
           secret:
-            secretName: scm-auth-secret
+            secretName: {{ $scm }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
