@@ -1,0 +1,44 @@
+{{- if .Values.components.orchestrator.enabled }}
+{{- $o := .Values.components.orchestrator }}
+# -----------------------------------------------------------------------------
+# Red Hat Automation Orchestrator: operator + BYO Postgres + the
+# AutomationOrchestrator CR, plus the setup Job that imports and publishes
+# the two remediation workflows. Its database password is materialized from
+# Vault by ESO (tssc-orchestrator-db), feeding the postgres env, the init SQL
+# and both connection Secrets without transiting this chart.
+#
+# Wave 10 (after gitlab at 8): the setup Job needs the seeded GitLab for its
+# project-id lookup and scm-auth-secret read.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" "orchestrator" "namespace" .Values.argocd.namespace "syncWave" $o.syncWave "root" .) }}
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/orchestrator
+    helm:
+      valuesObject:
+        domain: {{ .Values.deployer.domain | quote }}
+        namespace: {{ $o.namespace | quote }}
+        dbPasswordSecret: tssc-orchestrator-db
+        pipelineNamespace: {{ .Values.pipelineNamespace | quote }}
+        gitlab:
+          namespace: {{ .Values.components.gitlab.namespace | quote }}
+        gitops:
+          # The setup Job clones the SAME repo/revision this Application is
+          # sourced from, so the imported workflows cannot drift.
+          repoUrl: {{ .Values.gitops.repoURL | quote }}
+          revision: {{ .Values.gitops.revision | quote }}
+        vault:
+          kvMount: {{ .Values.vault.kvMount | quote }}
+          pathPrefix: {{ .Values.vault.pathPrefix | quote }}
+          secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $o.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- end }}

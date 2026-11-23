@@ -1,0 +1,266 @@
+# Repository bootstrap for Artifactory OSS 7.161.
+#
+# WHY THIS EXISTS: on OSS the repository management REST/UI APIs
+# (PUT/POST /api/repositories/{key}, /ui/api/v1/ui/repositories/{type}) are
+# all Pro-gated, and 7.161 also moved repositories OUT of the config
+# descriptor into a separate JSON store. The ONLY unguarded way to
+# preconfigure repos on OSS is the first-boot bootstrap importer, which reads
+#   etc/artifactory/artifactory.repository.config.import.json
+# and imports it when only the default repos exist. The JFrog Application
+# delivers this file via artifactory.artifactory.configMapName +
+# copyOnEveryStartup (see bootstrap/templates/artifactory.yaml).
+#
+# Defines two Lightwell REMOTE Maven proxies, a Maven Central proxy, and the
+# VIRTUAL Maven repos aggregating them. Builds mirror through
+#   <route>/artifactory/maven   (or the in-cluster Service for pipelines)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifactory-repo-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "artifactory.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  artifactory.repository.config.import.json: |
+    {
+      "localRepoConfigs": [],
+      "federatedRepoConfigs": [],
+      "releaseBundleRepoConfigs": [],
+      "remoteRepoConfigs": [
+        {
+          "type": "remote",
+          "key": "lightwell-validated",
+          "packageType": "maven",
+          "baseConfig": {
+            "modelVersion": 2,
+            "description": "Proxy: Lightwell validated Java packages",
+            "repoLayoutRef": "maven-2-default",
+            "includesPattern": "**/*",
+            "federationConfig": {
+              "federationOnGrid": false,
+              "members": [],
+              "modificationDate": 0,
+              "federated": false
+            }
+          },
+          "repoTypeConfig": {
+            "url": "https://packages.redhat.com/lightwell/public-lightwell-demo/java/validated/",
+            "offline": false,
+            "blackedOut": false,
+            "archiveBrowsingEnabled": false,
+            "storeArtifactsLocally": true,
+            "hardFail": false,
+            "propertySetRefs": [],
+            "downloadRedirectConfig": {
+              "enabled": false
+            },
+            "checksumPolicyType": "generate-if-absent",
+            "retrievalCachePeriodSecs": 7200,
+            "assumedOfflinePeriodSecs": 300,
+            "missedRetrievalCachePeriodSecs": 1800,
+            "metadataRetrievalTimeoutSecs": 60,
+            "unusedArtifactsCleanupPeriodHours": 0,
+            "socketTimeoutMillis": 15000,
+            "enableCookieManagement": false,
+            "allowAnyHostAuth": false,
+            "shareConfiguration": false,
+            "synchronizeProperties": false,
+            "listRemoteFolderItems": true,
+            "blockMismatchingMimeTypes": true,
+            "bypassHeadRequests": false,
+            "priorityResolution": false,
+            "handleReleases": true,
+            "handleSnapshots": true,
+            "maxUniqueSnapshots": 0,
+            "suppressPomConsistencyChecks": false
+          },
+          "packageTypeConfig": {},
+          "securityConfig": {
+            "hideUnauthorizedResources": false,
+            "signedUrlTtl": 90
+          },
+          "repoType": "REMOTE"
+        },
+        {
+          "type": "remote",
+          "key": "lightwell-remediated",
+          "packageType": "maven",
+          "baseConfig": {
+            "modelVersion": 2,
+            "description": "Proxy: Lightwell remediated Java packages",
+            "repoLayoutRef": "maven-2-default",
+            "includesPattern": "**/*",
+            "federationConfig": {
+              "federationOnGrid": false,
+              "members": [],
+              "modificationDate": 0,
+              "federated": false
+            }
+          },
+          "repoTypeConfig": {
+            "url": "https://packages.redhat.com/lightwell/public-lightwell-demo/java/remediated/",
+            "offline": false,
+            "blackedOut": false,
+            "archiveBrowsingEnabled": false,
+            "storeArtifactsLocally": true,
+            "hardFail": false,
+            "propertySetRefs": [],
+            "downloadRedirectConfig": {
+              "enabled": false
+            },
+            "checksumPolicyType": "generate-if-absent",
+            "retrievalCachePeriodSecs": 7200,
+            "assumedOfflinePeriodSecs": 300,
+            "missedRetrievalCachePeriodSecs": 1800,
+            "metadataRetrievalTimeoutSecs": 60,
+            "unusedArtifactsCleanupPeriodHours": 0,
+            "socketTimeoutMillis": 15000,
+            "enableCookieManagement": false,
+            "allowAnyHostAuth": false,
+            "shareConfiguration": false,
+            "synchronizeProperties": false,
+            "listRemoteFolderItems": true,
+            "blockMismatchingMimeTypes": true,
+            "bypassHeadRequests": false,
+            "priorityResolution": false,
+            "handleReleases": true,
+            "handleSnapshots": true,
+            "maxUniqueSnapshots": 0,
+            "suppressPomConsistencyChecks": false
+          },
+          "packageTypeConfig": {},
+          "securityConfig": {
+            "hideUnauthorizedResources": false,
+            "signedUrlTtl": 90
+          },
+          "repoType": "REMOTE"
+        },
+        {
+          "type": "remote",
+          "key": "maven-central",
+          "packageType": "maven",
+          "baseConfig": {
+            "modelVersion": 2,
+            "description": "Proxy: Maven Central (repo.maven.apache.org)",
+            "repoLayoutRef": "maven-2-default",
+            "includesPattern": "**/*",
+            "federationConfig": {
+              "federationOnGrid": false,
+              "members": [],
+              "modificationDate": 0,
+              "federated": false
+            }
+          },
+          "repoTypeConfig": {
+            "url": "https://repo.maven.apache.org/maven2/",
+            "offline": false,
+            "blackedOut": false,
+            "archiveBrowsingEnabled": false,
+            "storeArtifactsLocally": true,
+            "hardFail": false,
+            "propertySetRefs": [],
+            "downloadRedirectConfig": {
+              "enabled": false
+            },
+            "checksumPolicyType": "generate-if-absent",
+            "retrievalCachePeriodSecs": 7200,
+            "assumedOfflinePeriodSecs": 300,
+            "missedRetrievalCachePeriodSecs": 1800,
+            "metadataRetrievalTimeoutSecs": 60,
+            "unusedArtifactsCleanupPeriodHours": 0,
+            "socketTimeoutMillis": 15000,
+            "enableCookieManagement": false,
+            "allowAnyHostAuth": false,
+            "shareConfiguration": false,
+            "synchronizeProperties": false,
+            "listRemoteFolderItems": true,
+            "blockMismatchingMimeTypes": true,
+            "bypassHeadRequests": false,
+            "priorityResolution": false,
+            "handleReleases": true,
+            "handleSnapshots": false,
+            "maxUniqueSnapshots": 0,
+            "suppressPomConsistencyChecks": false
+          },
+          "packageTypeConfig": {},
+          "securityConfig": {
+            "hideUnauthorizedResources": false,
+            "signedUrlTtl": 90
+          },
+          "repoType": "REMOTE"
+        }
+      ],
+      "virtualRepoConfigs": [
+        {
+          "type": "virtual",
+          "key": "lightwell",
+          "packageType": "maven",
+          "baseConfig": {
+            "modelVersion": 2,
+            "description": "Aggregates the Lightwell validated + remediated proxies",
+            "repoLayoutRef": "maven-2-default",
+            "includesPattern": "**/*",
+            "federationConfig": {
+              "federationOnGrid": false,
+              "members": [],
+              "modificationDate": 0,
+              "federated": false
+            }
+          },
+          "repoTypeConfig": {
+            "repositoryRefs": [
+              "lightwell-validated",
+              "lightwell-remediated",
+              "maven-central"
+            ],
+            "artifactoryRequestsCanRetrieveRemoteArtifacts": false,
+            "virtualCacheConfig": {
+              "virtualRetrievalCachePeriodSecs": 7200
+            }
+          },
+          "packageTypeConfig": {},
+          "securityConfig": {
+            "hideUnauthorizedResources": false,
+            "signedUrlTtl": 90
+          },
+          "repoType": "VIRTUAL"
+        },
+        {
+          "type": "virtual",
+          "key": "maven",
+          "packageType": "maven",
+          "baseConfig": {
+            "modelVersion": 2,
+            "description": "Aggregates Lightwell validated + remediated + Maven Central",
+            "repoLayoutRef": "maven-2-default",
+            "includesPattern": "**/*",
+            "federationConfig": {
+              "federationOnGrid": false,
+              "members": [],
+              "modificationDate": 0,
+              "federated": false
+            }
+          },
+          "repoTypeConfig": {
+            "repositoryRefs": [
+              "lightwell-validated",
+              "lightwell-remediated",
+              "maven-central"
+            ],
+            "artifactoryRequestsCanRetrieveRemoteArtifacts": false,
+            "virtualCacheConfig": {
+              "virtualRetrievalCachePeriodSecs": 7200
+            }
+          },
+          "packageTypeConfig": {},
+          "securityConfig": {
+            "hideUnauthorizedResources": false,
+            "signedUrlTtl": 90
+          },
+          "repoType": "VIRTUAL"
+        }
+      ]
+    }

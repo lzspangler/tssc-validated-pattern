@@ -1,0 +1,114 @@
+{{- $ns := .Values.pipelineNamespace }}
+# Ad-hoc advisory upload tooling. This is NOT a Job -- it's a ConfigMap
+# holding a Python script you can exec into any pod to use. Mount it at
+# /scripts and run: python3 /scripts/upload_advisory.py <file.json>
+#
+# Prerequisites: the pod needs the ops-tpa-credentials Secret's env vars
+# (TPA_URL, OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rhtpa-upload-advisory
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+data:
+  upload_advisory.py: |
+    # Upload a single advisory/SBOM document to RHTPA from inside the
+    # cluster. Pure stdlib.
+    #
+    # Usage:
+    #   python3 upload_advisory.py <file.json>
+    #   python3 upload_advisory.py --verify <doc-id>
+    #
+    # Env vars required (from the ops-tpa-credentials Secret):
+    #   TPA_URL, OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
+    import json, os, ssl, sys, urllib.error, urllib.parse, urllib.request
+
+    RHTPA = os.environ.get("TPA_URL", "").rstrip("/")
+    ISSUER = os.environ.get("OIDC_ISSUER_URL", "").rstrip("/")
+    CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "tpa-cli")
+    CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+    if not RHTPA or not ISSUER or not CLIENT_SECRET:
+        sys.exit("ERROR: TPA_URL, OIDC_ISSUER_URL and OIDC_CLIENT_SECRET must be set")
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    def req(url, method="GET", data=None, headers=None, form=None):
+        if form is not None:
+            data = urllib.parse.urlencode(form).encode()
+            headers = {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})}
+        elif data is not None:
+            data = json.dumps(data).encode() if isinstance(data, dict) else data
+            headers = {"Content-Type": "application/json", **(headers or {})}
+        r = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+        try:
+            with urllib.request.urlopen(r, context=ctx, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()[:300]
+
+    # Authenticate
+    st, discovery = req(ISSUER + "/.well-known/openid-configuration")
+    if st != 200:
+        sys.exit("ERROR: OIDC discovery failed (%s)" % st)
+    st, tok = req(discovery["token_endpoint"], method="POST", form={
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+    })
+    if st != 200:
+        sys.exit("ERROR: token request failed (%s)" % st)
+    AUTH = {"Authorization": "Bearer " + tok["access_token"]}
+    print("authenticated")
+
+    if len(sys.argv) < 2:
+        sys.exit("Usage: upload_advisory.py <file.json> | --verify <doc-id>")
+
+    if sys.argv[1] == "--verify":
+        doc_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        st, result = req(RHTPA + "/api/v3/advisory?q=" + urllib.parse.quote(doc_id), headers=AUTH)
+        if st != 200:
+            # A failed query is NOT the same as "not found" -- the
+            # operator needs to know the difference.
+            sys.exit("ERROR: advisory query failed (HTTP %s): %s" % (st, result))
+        if result and result.get("items"):
+            for item in result["items"]:
+                print("  found:", item.get("id", "?"), "|", item.get("title", "?")[:60])
+        else:
+            print("  not found:", doc_id)
+        sys.exit(0)
+
+    # Upload
+    filepath = sys.argv[1]
+    body = open(filepath, "rb").read()
+    filename = os.path.basename(filepath)
+    # Detect CycloneDX by parsing the document (the bomFormat field), not
+    # by sniffing content -- a valid SBOM with leading whitespace or an
+    # unexpected filename falls through the old check.
+    is_cyclonedx = False
+    try:
+        parsed = json.loads(body)
+        is_cyclonedx = parsed.get("bomFormat") == "CycloneDX"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    if filename.endswith(".cdx.json") or is_cyclonedx:
+        endpoint = "/api/v3/sbom"
+    else:
+        endpoint = "/api/v3/advisory?format=osv"
+    r = urllib.request.Request(
+        RHTPA + endpoint,
+        data=body, headers={**AUTH, "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(r, context=ctx, timeout=30) as resp:
+            result = json.loads(resp.read())
+            print("  uploaded:", result.get("id", "?"))
+    except urllib.error.HTTPError as e:
+        print("  ERROR %s: %s" % (e.code, e.read().decode()[:200]))
+        sys.exit(1)

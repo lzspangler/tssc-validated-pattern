@@ -1,0 +1,59 @@
+{{- if .Values.components.gitlab.enabled }}
+{{- $g := .Values.components.gitlab }}
+# -----------------------------------------------------------------------------
+# GitLab, plus the seeding job that:
+#   * creates the application and gitops repositories from files in THIS repo
+#   * mints the per-repository project access tokens the pipelines push
+#     with (scm-auth-secret, scm-auth-lightwell-secret,
+#     scm-auth-gitops-secret, scm-auth-lightwell-gitops-secret)
+#   * mints one PaC token per application repo
+#     (gitlab-pac-token-<repo>) Pipelines-as-Code uses to watch it
+#   * commits the .tekton/ PaC PipelineRuns into the application repo
+#   * creates the PaC Repository CR in the pipeline namespace
+#   * registers BOTH webhooks per application repository: the PaC webhook
+#     (push / MR events) and the issue-comment webhook pointing at the
+#     agentic-issue-commands EventListener (see tekton-triggers.yaml), which
+#     handles the /remediate and /generate-tests-* slash commands
+#
+# The root password is NOT a value: the deployment sources it from the
+# tssc-gitlab-root-password Secret, which ESO materializes from Vault.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" "gitlab" "namespace" .Values.argocd.namespace "syncWave" $g.syncWave "root" .) }}
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/gitlab
+    helm:
+      valuesObject:
+        cluster:
+          subdomain: {{ .Values.deployer.domain | quote }}
+        # The seeding Job clones this repo to read the application and
+        # gitops files under apps/ -- the same source Argo reads from.
+        gitops:
+          repoUrl: {{ .Values.gitops.repoURL | quote }}
+          revision: {{ .Values.gitops.revision | quote }}
+        gitlab:
+          rootPasswordSecret: tssc-gitlab-root-password
+        pipeline:
+          namespace: {{ .Values.pipelineNamespace | quote }}
+        pac:
+          enabled: true
+          # The issue-comment EventListener wiring (gitlab-webhook-secret
+          # + the Note Hook webhook) only exists when Tekton is installed:
+          # bootstrap derives it from the tekton component so the seeding
+          # job never waits on a Route that will never appear.
+          issueCommands: {{ .Values.components.tekton.enabled }}
+        vault:
+          kvMount: {{ .Values.vault.kvMount | quote }}
+          pathPrefix: {{ .Values.vault.pathPrefix | quote }}
+          secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $g.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- end }}

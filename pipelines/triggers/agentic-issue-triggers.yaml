@@ -9,6 +9,53 @@
 #   /generate-tests-functional   ->  agentic-test-generation-functional
 #   /generate-tests-integration  ->  agentic-test-generation-integration
 #
+# WHY AN EVENTLISTENER ALONGSIDE PIPELINES-AS-CODE
+# The demo's trigger fabric is deliberately split in two:
+#
+#   * PUSH and MERGE-REQUEST events go through Pipelines as Code: the app
+#     repos carry .tekton/ PipelineRuns (committed by the GitLab seeding
+#     job) and Repository CRs point PaC at them.
+#   * ISSUE-COMMENT events go through this EventListener, because PaC only
+#     understands push, MR and MR-comment webhooks -- it never matches a
+#     comment on an ISSUE, and the slash commands above are the demo's
+#     interactive entry point for remediation and test generation.
+#
+# The two never overlap: PaC's webhook carries push/MR events only, and the
+# webhook pointing here carries Note Hooks only (the cel filters below then
+# drop everything that is not an issue comment starting with a command).
+# The GitLab seeding job (components/gitlab/templates/cm-gitlab-init.yaml)
+# creates BOTH webhooks and mints the shared gitlab-webhook-secret this
+# EventListener validates X-Gitlab-Token against.
+#
+# ---- commenter authorization ---------------------------------------------
+# The webhook token authenticates GITLAB to the EventListener; it says
+# nothing about the COMMENTER. GitLab's Note Hook payload carries no role
+# or permission data for the commenting user (just id/name/username), and
+# cel cannot call the GitLab API -- so the only enforceable check here is
+# a username allowlist. Every filter below requires
+#   body.user.username in ['root'] || body.user.username.startsWith('project_')
+#
+# NOTE on the second clause: a GitLab PROJECT ACCESS TOKEN does not act
+# under its human-readable name ("ssc-demo-pipeline" is the token NAME) --
+# the bot user in the payload is project_<id>_bot_<hash>, and the hash is
+# minted per token creation, so it differs on every install. Matching the
+# project_ prefix is still safe AND durable: a project-bot user is a
+# member of exactly its own project, so any project_* user commenting on
+# this project's issue is necessarily one of THIS project's tokens (all of
+# which the seeding job creates at Maintainer level). Fail closed: an
+# unknown human commenter is rejected, not silently run. If you seed demo
+# users (gitlab.users in the gitlab component), ADD THEM to the ['root']
+# list in all four filters -- a missing username is indistinguishable from
+# an unauthorized one, and the symptom of forgetting is exactly "the
+# command did not trigger a pipeline".
+#
+# ---- per-repository SCM credentials --------------------------------------
+# Each application repository has its OWN project-scoped token Secret in
+# the pipeline namespace (a GitLab project bot is a member of exactly one
+# project). The scm_secret overlay in each trigger maps the event's
+# project to its Secret, and the bindings forward it as the pipeline's
+# scm-secret-name parameter. Extend the mapping when adding an app repo.
+#
 # Flow:  GitLab issue comment  ->  webhook (Note Hook)  ->  EventListener
 #        ->  gitlab interceptor (validate X-Gitlab-Token, event type)
 #        ->  cel interceptor (filter on the command [+ merge the decision])
@@ -100,6 +147,9 @@ spec:
       value: $(extensions.git_host)
     - name: base-branch
       value: $(extensions.base_branch)
+    # Per-repository SCM credential (cel overlay; see the header note).
+    - name: scm-secret-name
+      value: $(extensions.scm_secret)
     # The merged six-field decision (comment overrides issue; see cel overlays).
     - name: SELECTED
       value: $(extensions.SELECTED)
@@ -257,6 +307,9 @@ spec:
       value: $(extensions.git_host)
     - name: base-branch
       value: $(extensions.base_branch)
+    # Per-repository SCM credential (cel overlay; see the header note).
+    - name: scm-secret-name
+      value: $(extensions.scm_secret)
     # The commented-on issue's project-scoped number, so the opened MR can link
     # back to it (see the issue_iid overlay in the EventListener).
     - name: issue-iid
@@ -578,6 +631,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/remediate')
             - name: overlays
               value:
@@ -585,10 +639,14 @@ spec:
                 - key: issueRaw
                   expression: >-
                     (has(body.issue) && has(body.issue.description) && body.issue.description != null && size(body.issue.description.split("<!-- cve-decision")) > 1) ? body.issue.description.split("<!-- cve-decision")[1].split("-->")[0] : ""
-                # Raw override text from the comment (everything after /remediate).
+                # Raw override text from the comment: everything after the
+                # LEADING /remediate. substring(10), not split("/remediate")[1]
+                # -- split breaks a valid override whose field VALUE contains
+                # the command again (e.g. a JUSTIFICATION mentioning
+                # /remediate), truncating the JSON/YAML mid-value.
                 - key: commentRaw
                   expression: >-
-                    size(body.object_attributes.note.split("/remediate")) > 1 ? body.object_attributes.note.split("/remediate")[1] : ""
+                    body.object_attributes.note.startsWith('/remediate') ? body.object_attributes.note.substring(10) : ""
         # (b) Parse both raw blocks into maps (parseYAML also accepts JSON). Skip
         #     parsing when there's no "key: value" content, to avoid errors on empty
         #     text. Reads extensions.issueRaw / commentRaw from the previous stage.
@@ -632,6 +690,12 @@ spec:
                 - key: git_host
                   expression: >-
                     body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
                 - key: base_branch
                   expression: >-
                     (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
@@ -678,12 +742,19 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/generate-tests-unit')
             - name: overlays
               value:
                 - key: git_host
                   expression: >-
                     body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
                 - key: base_branch
                   expression: >-
                     (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
@@ -721,12 +792,19 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/generate-tests-functional')
             - name: overlays
               value:
                 - key: git_host
                   expression: >-
                     body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
                 - key: base_branch
                   expression: >-
                     (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
@@ -764,12 +842,19 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
                 body.object_attributes.note.startsWith('/generate-tests-integration')
             - name: overlays
               value:
                 - key: git_host
                   expression: >-
                     body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
                 - key: base_branch
                   expression: >-
                     (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
@@ -783,8 +868,10 @@ spec:
       template:
         ref: test-generation-integration-issue-template
 ---
-# Expose the EventListener so GitLab can reach it. Point the GitLab webhook URL at
-# this Route's https:// host. (OpenShift-specific; drop if you expose it another way.)
+# Expose the EventListener so GitLab can reach it. The GitLab seeding job
+# creates a Note Hook webhook on each application repository pointing at
+# this Route's https:// host, with the gitlab-webhook-secret token.
+# (OpenShift-specific; drop if you expose it another way.)
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:

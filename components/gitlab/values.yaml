@@ -1,0 +1,275 @@
+# -----------------------------------------------------------------------------
+# GitLab for the TSSC validated pattern.
+#
+# Adapted from redhat-ads-tech/ocp-app-platform-demo-helm v1.4.2 (`gitlab`).
+# Differences from upstream, all because this is a supply-chain demo rather
+# than the full RHDH platform demo:
+#
+#   * The root password is a Vault credential (ESO materializes it), not a
+#     Helm value.
+#   * The RHDH software-template import job is gone (no Developer Hub here).
+#   * Added: per-repository labels, one project access token per repository
+#     written straight into the pipeline namespace (`scm-auth-secret`,
+#     `scm-auth-lightwell-secret`, `scm-auth-gitops-secret`,
+#     `scm-auth-lightwell-gitops-secret`), and the full Pipelines-as-Code
+#     wiring (a per-repo PaC token, .tekton/ definitions committed into the
+#     application repo,
+#     Repository CR). See templates/cm-gitlab-init.yaml.
+#
+# The only value that MUST be set per cluster is `cluster.subdomain`;
+# everything else derives from it.
+# -----------------------------------------------------------------------------
+
+cluster:
+  # Apps subdomain of the target cluster, e.g. apps.cluster-abcde.example.com.
+  # No leading dot. Required.
+  subdomain: ""
+
+# The GitOps repository the seeding Job clones to read application and
+# gitops files under apps/. Set by bootstrap from gitops.repoURL/revision.
+gitops:
+  repoUrl: ""
+  revision: main
+
+gitlab:
+  image: quay.io/redhat-gpte/gitlab:17.4.1
+
+  # Public hostname. Leave empty to derive `gitlab-<namespace>.<subdomain>`,
+  # which is what the OpenShift router gives the Route below.
+  host: ""
+  https: "true"
+
+  email:
+    address: "gitlab@rhdemo.com"
+    displayName: "GitLab Admin"
+    replyTo: "noreply@rhdemo.com"
+  rootEmail: "root@rhdemo.com"
+
+  smtp:
+    enabled: "false"
+    domain: "rhdemo.com"
+    host: ""
+    port: "587"
+    user: "gitlab"
+    password: "gitlab"
+
+  ssh:
+    # Leave empty to derive `gitlab-ssh-<namespace>.<subdomain>`.
+    host: ""
+    port: "22"
+
+  # NOT a value: the root password is generated into Vault by the
+  # vault-secrets component (entry gitlab-root-password) and materialized as
+  # this named Secret by ESO; the Deployment sources GITLAB_ROOT_PASSWORD
+  # from it. The seeding Job never needs it -- it mints a root personal
+  # access token by exec'ing rails inside the pod.
+  rootPasswordSecret: tssc-gitlab-root-password
+
+  # GitLab refuses to boot without these; they key the encrypted columns in the
+  # database. Any stable string works for a throwaway demo, but changing them
+  # after first boot orphans every stored credential.
+  keyBase:
+    db: "0123456789"
+    otp: "0123456789"
+    secret: "0123456789"
+
+  users:
+    # The demo drives everything as root, so no demo users are created by
+    # default. Add entries here (id/name) to get them; their password is
+    # random-generated per user (see _helpers.tpl).
+    users: []
+
+  # Groups, repositories and projects created by the seeding job. This mirrors
+  # the reference cluster: one group, one imported application repository, and
+  # the imported gitops repository gitops-cd-dev promotes into.
+  groups:
+    - name: development
+      users: []
+      repo:
+        # `source` is a repo-relative path under apps/ in the GitOps
+        # repository -- the seeding Job clones THIS repo and pushes the
+        # files as the project's initial commit via the GitLab API. No
+        # external GitHub dependency. To add more example applications,
+        # add a directory under apps/<name>/application/ and
+        # apps/<name>/gitops/, then add entries here.
+        - name: spring-boot-example-application
+          source: apps/spring-boot-example/application
+          defaultBranch: main
+
+          # The CVE issues opened by `open-cve-issues` carry a severity label
+          # (critical/high/medium/low/unknown) plus the base labels passed to
+          # the task. GitLab auto-creates a missing label on first use in a
+          # muddy grey; creating them up front keeps the demo board readable
+          # and gives them the shared colour.
+          labels:
+            - { name: cve, color: "#6699cc" }
+            - { name: security, color: "#6699cc" }
+            - { name: critical, color: "#6699cc" }
+            - { name: high, color: "#6699cc" }
+            - { name: medium, color: "#6699cc" }
+            - { name: low, color: "#6699cc" }
+            - { name: unknown, color: "#6699cc" }
+
+          # Pipelines-as-Code wiring for this repository. The seeding job
+          # mints THIS repository's project access token for PaC
+          # (gitlab-pac-token-spring-boot-example-application -- one per
+          # repo, since a project bot cannot read any other project),
+          # commits the .tekton/ PipelineRun definitions (rendered per
+          # cluster from templates/cm-pac-pipelines.yaml) into the default
+          # branch, and creates the Repository CR in the pipeline
+          # namespace. It also
+          # registers BOTH GitLab webhooks: the PaC webhook (push / MR
+          # events, which PaC does not reliably create itself) and the
+          # issue-comment webhook pointing at the agentic-issue-commands
+          # EventListener (pipelines/triggers/), the only consumer that can
+          # match /remediate and /generate-tests-* on ISSUES.
+          pac:
+            enabled: true
+            tokenName: ssc-demo-pac
+
+          # Minted by the seeding job and written to the pipeline namespace as
+          # `scm-auth-secret` (keys: username=oauth2, token=<pat>), which is what
+          # the open-pr / open-cve-issues tasks consume. Set `enabled: false` if
+          # you would rather create that Secret by hand.
+          accessToken:
+            enabled: true
+            name: ssc-demo-pipeline
+            # api covers issue + merge-request creation; write_repository covers
+            # the branch push open-pr does.
+            scopes:
+              - api
+              - write_repository
+            # 40 = Maintainer. Lower levels cannot push to a protected branch.
+            accessLevel: 40
+            # GitLab rejects an expiry more than 365 days out; stay inside it.
+            expiresInDays: 364
+
+        # The Lightwell Java demo application -- the second example app,
+        # with the same remediation treatment (CVE analysis, issues, PaC).
+        - name: lightwell-java-demo-app
+          source: apps/lightwell-java-demo/application
+          defaultBranch: main
+          labels:
+            - { name: cve, color: "#6699cc" }
+            - { name: security, color: "#6699cc" }
+            - { name: critical, color: "#6699cc" }
+            - { name: high, color: "#6699cc" }
+            - { name: medium, color: "#6699cc" }
+            - { name: low, color: "#6699cc" }
+            - { name: unknown, color: "#6699cc" }
+          pac:
+            enabled: true
+            tokenName: lightwell-demo-pac
+          accessToken:
+            enabled: true
+            name: lightwell-demo-pipeline
+            # Its OWN Secret, not the spring-boot application's
+            # scm-auth-secret: a GitLab project-bot user is a member of
+            # exactly one project, so a shared Secret would leave this
+            # repo's remediation/test-generation runs pushing with the
+            # OTHER project's token (403). The EventListener's cel
+            # interceptors map this repo's events to this Secret name
+            # (pipelines/triggers/agentic-issue-triggers.yaml).
+            secretName: scm-auth-lightwell-secret
+            scopes:
+              - api
+              - write_repository
+            accessLevel: 40
+            expiresInDays: 364
+
+        # The gitops repository: what the gitops-cd-dev pipeline promotes into
+        # (MR bumping image.tag in app/spring-boot-example/environments/dev/
+        # values.yaml) and what the spring-boot-example-dev Argo CD Application
+        # tracks. No labels, no webhooks -- nothing ever pushes here except the
+        # promotion pipeline, and no GitLab hook should fire on its merges.
+        - name: spring-boot-example-gitops
+          source: apps/spring-boot-example/gitops
+          defaultBranch: main
+
+          # Imported repos carry the cluster they were authored on: the chart's
+          # base values hardcode a Quay host under quay.<domain>, and workshop
+          # clusters get a new domain on every rebuild. gitops-cd-dev only ever
+          # rewrites image.tag -- never repository -- so without this fix every
+          # environment would pull from a registry that no longer exists. After
+          # the import, the seeding job commits a one-line retarget of
+          # image.repository to THIS cluster's Quay.
+          rewriteImageRepository:
+            enabled: true
+            file: app/spring-boot-example/values.yaml
+            quayOrganization: tssc
+            component: spring-boot-example-application
+
+          # A SEPARATE project access token from the application repository's:
+          # a GitLab project-bot user is a member of exactly one project and
+          # CANNOT be added to another ("project bots cannot be added to other
+          # groups / projects"), so the gitops repo needs its own bot. Minted
+          # into the pipeline namespace as `scm-auth-gitops-secret`, which
+          # gitops-cd-dev reads via its `scm-secret-name` parameter.
+          accessToken:
+            enabled: true
+            name: ssc-demo-pipeline-gitops
+            secretName: scm-auth-gitops-secret
+            # api covers merge-request creation; write_repository covers the
+            # gitops/<env>-image-<tag> branch push.
+            scopes:
+              - api
+              - write_repository
+            # 40 = Maintainer: enough to push a branch and open + accept an MR
+            # while the protected default branch stays closed to direct push.
+            accessLevel: 40
+            # GitLab rejects an expiry more than 365 days out; stay inside it.
+            expiresInDays: 364
+
+        # The Lightwell Java demo gitops repository -- same promotion
+        # pattern as spring-boot-example-gitops.
+        - name: lightwell-java-demo-app-gitops
+          source: apps/lightwell-java-demo/gitops
+          defaultBranch: main
+          rewriteImageRepository:
+            enabled: true
+            file: app/lightwell-java-demo/values.yaml
+            quayOrganization: tssc
+            component: lightwell-java-demo-app
+          accessToken:
+            enabled: true
+            name: lightwell-demo-pipeline-gitops
+            secretName: scm-auth-lightwell-gitops-secret
+            scopes:
+              - api
+              - write_repository
+            accessLevel: 40
+            expiresInDays: 364
+      project: []
+
+# Namespace the Tekton pipelines run in. The seeding job writes the
+# per-repo SCM secrets, the per-repo `gitlab-pac-token-<repo>` secrets and
+# the shared `gitlab-pac-webhook` / `gitlab-webhook-secret` here, and
+# creates the PaC Repository CRs here, so it must match the namespace the
+# pipelines are installed into.
+pipeline:
+  namespace: tssc-app-ci
+
+postgresql:
+  dbUser: gitlab
+  dbPassword: passw0rd
+  dbName: gitlab_production
+
+argocd:
+  enabled: true
+
+# Vault wiring for the ExternalSecret this chart renders (root password).
+vault:
+  kvMount: secret
+  pathPrefix: tssc-validated-pattern
+  secretStoreName: vault-cluster
+
+# Whether the PaC pipeline definitions ConfigMap is rendered at all (kept in
+# step with the per-repo `pac` blocks above; the chart-level gate exists so
+# a pac-less install renders no ConfigMap either). `issueCommands` gates the
+# seeding job's EventListener half (gitlab-webhook-secret + the Note Hook
+# webhook): without Tekton there is no Route to point at, and an ungated
+# wait would abort the whole seeding. Bootstrap sets it from
+# components.tekton.enabled.
+pac:
+  enabled: true
+  issueCommands: true

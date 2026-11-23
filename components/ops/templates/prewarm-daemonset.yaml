@@ -1,0 +1,41 @@
+{{- $ns := .Values.pipelineNamespace }}
+# Pre-warms the large (~1.8 GB) ai-agent image onto every node so Tekton
+# steps that run in it (open-cve-issues, open-pr-*, ai-remediate-*) never
+# fetch it from the external Quay CDN at task time. A single transient CDN
+# blob read puts the pod in ImagePullBackOff, and Tekton fails the TaskRun
+# on ImagePullBackOff WITHOUT waiting for kubelet's successful retry. With
+# the image already present (fixed tag => IfNotPresent), the step's pull is
+# a no-op and can't flake.
+#
+# Keep it running to stay warm across node reboots/new nodes. Bump
+# .Values.agentImage whenever the tasks' GIT_IMAGE / agent-image tag changes.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ai-agent-image-prewarm
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-prewarm
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-agent-image-prewarm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-agent-image-prewarm
+    spec:
+      containers:
+        - name: prewarm
+          image: {{ .Values.agentImage | quote }}
+          command: ["/bin/sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi

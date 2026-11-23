@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.6.0",
+  "id": "LW-DEMO-0024",
+  "aliases": [
+    "CVE-2023-20863"
+  ],
+  "modified": "2026-11-01T00:00:00Z",
+  "published": "2026-11-01T00:00:00Z",
+  "summary": "Lightwell backport remediation for CVE-2023-20863 (org.springframework:spring-expression)",
+  "details": "Spring Expression Language (SpEL) denial of service via crafted expressions that trigger excessive evaluation. Affects versions prior to 5.3.27; Lightwell backports the fix onto the 5.3.18 line.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Maven",
+        "name": "org.springframework:spring-expression",
+        "purl": "pkg:maven/org.springframework/spring-expression@5.3.18"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "5.3.18.rhlw-00010"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "5.3.18"
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://packages.redhat.com/lightwell/osv/java/remediated"
+    }
+  ]
+}

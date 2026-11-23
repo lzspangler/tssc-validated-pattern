@@ -1,0 +1,40 @@
+# -----------------------------------------------------------------------------
+# External Secrets Operator, installed from redhat-operators
+# (openshift-external-secrets-operator, channel stable-v1), plus the
+# ClusterSecretStore that fronts the cluster's EXISTING Vault.
+#
+# The operator subscription uses Manual installPlan approval; the InstallPlan
+# approver Job in this chart approves it as soon as it appears (the x2a-fsc
+# pattern) so a GitOps install does not stall waiting for a human.
+#
+# The ClusterSecretStore authenticates with a static token read from Secret
+# <vault.tokenSecretName> in <vault.namespace> -- the same platform-provided
+# token the vault-secrets component uses to write. If the platform Vault is
+# configured for Kubernetes auth instead, swap the auth block in
+# templates/clustersecretstore.yaml; nothing else changes.
+#
+# Vault is expected to be reachable in-cluster at <vault.server> with a KV v2
+# mount at <vault.kvMount>. Credentials live at
+#   <kvMount>/<pathPrefix>/<name>
+# where the names are owned by the vault-secrets component.
+# -----------------------------------------------------------------------------
+namespace: external-secrets-operator
+controllerNamespace: external-secrets
+
+operator:
+  name: openshift-external-secrets-operator
+  channel: stable-v1
+  source: redhat-operators
+
+vault:
+  server: ""
+  name: vault
+  namespace: vault
+  # Port of the Vault API listener (also used by the egress NetworkPolicy).
+  port: 8200
+  tokenSecretName: vault-token
+  tokenSecretKey: token
+  kvMount: secret
+  secretStoreName: vault-cluster
+
+syncWave: "0"

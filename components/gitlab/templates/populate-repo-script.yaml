@@ -1,0 +1,68 @@
+{{- if .Values.gitops.repoUrl }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: populate-repo-script
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: gitlab
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+data:
+  populate-repo.sh: |
+    #!/bin/bash
+    # Populate a GitLab project from a directory in the cloned GitOps repo.
+    # Usage: populate-repo.sh <source_path> <project_slug> <branch>
+    # Environment: GITLAB_TOKEN, GITLAB_HOST
+    #
+    # Builds a JSON "actions" array (one create per file) and pushes it as
+    # the initial commit via the GitLab commits API. A project created with
+    # no import_url has an empty repository, so the first file create also
+    # creates the default branch.
+    set -e
+
+    SOURCE_PATH="$1"
+    PROJECT_SLUG="$2"
+    BRANCH="$3"
+
+    SOURCE_DIR="/tmp/repo/${SOURCE_PATH}"
+
+    [ -d "${SOURCE_DIR}" ] || { echo "ERROR: ${SOURCE_PATH} not found in the cloned repo"; exit 1; }
+
+    # Build the actions JSON array (one create per file)
+    ACTIONS="["
+    FIRST=true
+    while IFS= read -r -d '' FILE; do
+      REL_PATH="${FILE#${SOURCE_DIR}/}"
+      CONTENT_B64=$(base64 -w 0 < "${FILE}")
+      if [ "$FIRST" = true ]; then
+        FIRST=false
+      else
+        ACTIONS+=","
+      fi
+      ACTIONS+="{\"action\":\"create\",\"file_path\":\"${REL_PATH}\",\"encoding\":\"base64\",\"content\":\"${CONTENT_B64}\"}"
+    done < <(find "${SOURCE_DIR}" -type f -print0)
+    ACTIONS+="]"
+
+    # Build the request body
+    BODY=$(printf '{"branch":"%s","commit_message":"Initial import from tssc-validated-pattern","actions":%s}' "${BRANCH}" "${ACTIONS}")
+
+    FILE_COUNT=$(printf '%s' "${ACTIONS}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
+    echo "Committing ${FILE_COUNT} files to ${PROJECT_SLUG} on ${BRANCH}"
+
+    # Push as the initial commit via the commits API
+    RESP=$(curl -s --request POST \
+      "https://${GITLAB_HOST}/api/v4/projects/${PROJECT_SLUG}/repository/commits" \
+      --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      --header "Content-Type: application/json" \
+      --data "${BODY}")
+
+    echo "${RESP}" | python3 -c '
+    import json,sys
+    r=json.load(sys.stdin)
+    if "id" in r:
+        print("  committed:", r.get("short_id","?"), "on", r.get("branch","?"))
+    else:
+        print("  ERROR:", json.dumps(r)[:200]); sys.exit(1)'
+
+{{- end }}

@@ -1,0 +1,343 @@
+{{- if .Values.pipelines.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipelines-defaults
+  namespace: {{ .Values.platformDefaults.namespace }}
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+data:
+  bootstrap.py: |
+    # Post-install platform defaults the operators cannot set themselves.
+    #
+    # Idempotent, because this runs on every Argo sync:
+    #   1. TektonConfig spec.pipeline.default-timeout-minutes -- the DEFAULT
+    #      PipelineRun timeout. The API server materializes it into
+    #      spec.timeouts.pipeline of every run created WITHOUT an explicit
+    #      one (verified with a server-side dry-run). This reaches trigger-
+    #      and CLI-created runs; it does NOT reach console-started runs (the
+    #      web console submits an explicit 1h0m0s on every run it starts) and
+    #      it overwrites the legacy spec.timeout field rather than respecting
+    #      it. The stock 60m no longer fits: the
+    #      cve-analysis upstream tasks alone eat ~40 min at current advisory
+    #      scale, and the model-gated analysis needs another ~45-90 min.
+    #   2. console.operator/cluster spec.plugins += pipelines-console-plugin --
+    #      on OCP 4.15+ the web console shows the Pipelines nav only when the
+    #      plugin is listed there; installing the operator alone never adds it.
+    #   3. Argocd/openshift-gitops spec.controller.resources -- the application
+    #      controller ships with a 2Gi memory limit, which this app-of-apps
+    #      OOM-kills against (verified on cluster-dl265: exit 137 mid-bootstrap,
+    #      Applications stuck Unknown / syncs dying mid-operation). Raised to
+    #      8Gi here, before the heavy waves (gitlab 8, quay/rhtpa 10) start.
+    #      Only ever RAISES the limit -- a deliberately higher value is left
+    #      alone.
+    #   4. TektonConfig spec.platforms.openshift.pipelinesAsCode.settings
+    #      .remote-tasks = "false" -- PaC's resolver (v0.50.x) resolves every
+    #      bare pipelineRef/taskRef a .tekton PipelineRun carries ONLY from
+    #      YAML in the same .tekton/ directory or from remote-pipeline/task
+    #      annotations; there is no cluster-resource fallback, so a
+    #      pipelineRef to an Argo-installed Pipeline fails with "cannot find
+    #      referenced pipeline". Disabling remote-tasks skips that resolution
+    #      entirely: PaC creates the PipelineRun verbatim and the Tekton
+    #      controllers resolve the refs against the cluster -- which is
+    #      exactly this demo's model (Pipelines and Tasks centrally synced
+    #      under pipelines/, thin .tekton files in the app repos).
+    #
+    # Why a Job rather than plain manifests: both CRs are operator-owned,
+    # cluster-scoped and heavily defaulted. Argo owning the whole object would
+    # fight the operator that curates it; a merge-patch of just these fields
+    # does not. Same approach as the Chains bootstrap Job.
+    #
+    # Pure stdlib against the in-cluster API -- no oc, no pip install at runtime.
+    import json, os, ssl, sys, time, urllib.error, urllib.request
+
+    API = "https://kubernetes.default.svc"
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    token = open(SA + "/token").read().strip()
+    ctx = ssl.create_default_context(cafile=SA + "/ca.crt")
+
+    def call(path, method="GET", body=None, ctype="application/json"):
+        req = urllib.request.Request(
+            API + path, method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": "Bearer " + token, "Accept": "application/json",
+                     **({"Content-Type": ctype} if body is not None else {})})
+        try:
+            with urllib.request.urlopen(req, context=ctx) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()[:300]
+
+    # ---- 1. TektonConfig default PipelineRun timeout -----------------------
+    # The operator creates TektonConfig asynchronously after the Subscription
+    # resolves, so wait rather than failing the first sync.
+    timeout_minutes = int(os.environ["DEFAULT_TIMEOUT_MINUTES"])
+    if timeout_minutes <= 0:
+        print("TektonConfig default-timeout-minutes: 0, leaving the operator default alone")
+    else:
+        deadline = time.time() + int(os.environ.get("TIMEOUT_SECONDS", "900"))
+        while True:
+            st, cfg = call("/apis/operator.tekton.dev/v1alpha1/tektonconfigs/config")
+            if st == 200:
+                break
+            if time.time() > deadline:
+                sys.exit("TIMEOUT: TektonConfig/config never appeared (%s)" % st)
+            print("waiting for TektonConfig/config ... (%s)" % st, flush=True)
+            time.sleep(15)
+
+        current = ((cfg.get("spec") or {}).get("pipeline") or {}).get("default-timeout-minutes")
+        if current == timeout_minutes:
+            print("TektonConfig default-timeout-minutes: already %s" % current)
+        else:
+            st, err = call("/apis/operator.tekton.dev/v1alpha1/tektonconfigs/config",
+                           "PATCH",
+                           {"spec": {"pipeline": {"default-timeout-minutes": timeout_minutes}}},
+                           "application/merge-patch+json")
+            if st != 200:
+                sys.exit("ERROR: patching TektonConfig: %s %s" % (st, err))
+            print("TektonConfig default-timeout-minutes: %s -> %s"
+                  % (current if current is not None else "<operator default>", timeout_minutes))
+
+    # ---- 2. Pipelines nav in the web console -------------------------------
+    if os.environ.get("ENABLE_CONSOLE_PLUGIN", "") != "true":
+        print("console plugin: disabled by values, skipping")
+    else:
+        st, con = call("/apis/operator.openshift.io/v1/consoles/cluster")
+        if st != 200:
+            sys.exit("ERROR: reading console.operator/cluster: %s %s" % (st, con))
+        plugins = ((con.get("spec") or {}).get("plugins")) or []
+        if "pipelines-console-plugin" in plugins:
+            print("console plugins: pipelines-console-plugin already present")
+        else:
+            # A merge-patch replaces the array wholesale, so send the FULL
+            # merged list -- the console operator curates the other entries
+            # (monitoring-plugin, networking-console-plugin, ...).
+            merged = plugins + ["pipelines-console-plugin"]
+            st, err = call("/apis/operator.openshift.io/v1/consoles/cluster",
+                           "PATCH", {"spec": {"plugins": merged}},
+                           "application/merge-patch+json")
+            if st != 200:
+                sys.exit("ERROR: patching console.operator/cluster: %s %s" % (st, err))
+            print("console plugins: added pipelines-console-plugin ->", merged)
+
+    # ---- 3. Argo CD application-controller memory ---------------------------
+    # The stock openshift-gitops instance limits the controller to 2Gi; this
+    # app-of-apps OOM-kills it during the bootstrap (see the header). Only
+    # ever RAISE: skip when the live limit already meets or exceeds the
+    # target, so a deliberate higher setting survives.
+    def mem_mib(v):
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        for suffix, mult in (("Gi", 1024), ("Mi", 1), ("Ki", 1 / 1024)):
+            if v.endswith(suffix):
+                try:
+                    return int(float(v[: -len(suffix)]) * mult)
+                except ValueError:
+                    return None
+        return None
+
+    if os.environ.get("ARGOCD_CONTROLLER_MEMORY", "") == "":
+        print("argocd controller memory: disabled by values, skipping")
+    else:
+        target = os.environ["ARGOCD_CONTROLLER_MEMORY"]
+        argocd_ns = os.environ["ARGOCD_NAMESPACE"]
+        argocd_name = os.environ["ARGOCD_NAME"]
+        path = "/apis/argoproj.io/v1alpha1/namespaces/%s/argocds/%s" % (argocd_ns, argocd_name)
+        st, acd = call(path)
+        if st != 200:
+            sys.exit("ERROR: reading Argocd/%s: %s %s" % (argocd_name, st, acd))
+        res = (((acd.get("spec") or {}).get("controller")) or {}).get("resources") or {}
+        current = ((res.get("limits") or {}).get("memory"))
+        current_mib = mem_mib(current)
+        target_mib = mem_mib(target)
+        if current_mib is not None and target_mib is not None and current_mib >= target_mib:
+            print("argocd controller memory: limit already %s, leaving alone" % current)
+        else:
+            st, err = call(path, "PATCH",
+                           {"spec": {"controller": {"resources": {
+                               "requests": {"memory": os.environ.get("ARGOCD_CONTROLLER_MEMORY_REQUEST", "2Gi")},
+                               "limits": {"memory": target}}}}},
+                           "application/merge-patch+json")
+            if st != 200:
+                sys.exit("ERROR: patching Argocd/%s: %s %s" % (argocd_name, st, err))
+            print("argocd controller memory: %s -> %s"
+                  % (current if current else "<operator default>", target))
+
+    # ---- 4. PaC remote-tasks resolution off ---------------------------------
+    # See the header note: with remote-tasks on (the operator default), PaC
+    # refuses a .tekton PipelineRun whose pipelineRef points at a
+    # cluster-installed Pipeline. Empty PAC_REMOTE_TASKS skips the step
+    # (leave the operator default alone).
+    if os.environ.get("PAC_REMOTE_TASKS", "") == "":
+        print("pac remote-tasks: disabled by values, skipping")
+    else:
+        st, cfg = call("/apis/operator.tekton.dev/v1alpha1/tektonconfigs/config")
+        if st != 200:
+            sys.exit("ERROR: reading TektonConfig/config: %s %s" % (st, cfg))
+        settings = ((((cfg.get("spec") or {}).get("platforms") or {})
+                     .get("openshift") or {}).get("pipelinesAsCode") or {}).get("settings") or {}
+        current = settings.get("remote-tasks")
+        if current == os.environ["PAC_REMOTE_TASKS"]:
+            print("pac remote-tasks: already %r" % current)
+        else:
+            st, err = call("/apis/operator.tekton.dev/v1alpha1/tektonconfigs/config",
+                           "PATCH",
+                           {"spec": {"platforms": {"openshift": {"pipelinesAsCode": {
+                               "settings": {"remote-tasks": os.environ["PAC_REMOTE_TASKS"]}}}}}},
+                           "application/merge-patch+json")
+            if st != 200:
+                sys.exit("ERROR: patching TektonConfig remote-tasks: %s %s" % (st, err))
+            print("pac remote-tasks: %r -> %r" % (current, os.environ["PAC_REMOTE_TASKS"]))
+
+    print("OK: platform defaults applied")
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipelines-defaults
+  namespace: {{ .Values.platformDefaults.namespace }}
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+---
+# Both targets are CLUSTER-scoped, so this needs a ClusterRole -- there is no
+# namespaced path to either. Narrow on purpose: this Job runs on every sync
+# and should never hold broader rights than it needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipelines-defaults
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+rules:
+  - apiGroups: ["operator.tekton.dev"]
+    resources: ["tektonconfigs"]
+    verbs: ["get", "patch", "update"]
+{{- if .Values.platformDefaults.consolePlugin.enabled }}
+  - apiGroups: ["operator.openshift.io"]
+    resources: ["consoles"]
+    verbs: ["get", "patch", "update"]
+{{- end }}
+{{- if .Values.platformDefaults.argocdController.enabled }}
+---
+# The Argocd CR is NAMESPACED (unlike the two targets above), so this is a
+# Role in the gitops namespace, bound to the Job's ServiceAccount from
+# openshift-pipelines.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipelines-defaults-argocd
+  namespace: {{ .Values.platformDefaults.argocdController.namespace }}
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["argocds"]
+    resourceNames: [{{ .Values.platformDefaults.argocdController.name | quote }}]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipelines-defaults-argocd
+  namespace: {{ .Values.platformDefaults.argocdController.namespace }}
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipelines-defaults-argocd
+subjects:
+  - kind: ServiceAccount
+    name: pipelines-defaults
+    namespace: {{ .Values.platformDefaults.namespace }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pipelines-defaults
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pipelines-defaults
+subjects:
+  - kind: ServiceAccount
+    name: pipelines-defaults
+    namespace: {{ .Values.platformDefaults.namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pipelines-defaults
+  namespace: {{ .Values.platformDefaults.namespace }}
+  labels:
+    {{- include "pipelines.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
+    # Replace+Force, for the same reason as the Chains bootstrap Job: a Job's
+    # pod template is immutable, so a plain sync fails with "field is
+    # immutable" and never re-runs an edited script.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "pipelines.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: pipelines-defaults
+      volumes:
+        - name: scripts
+          configMap:
+            name: pipelines-defaults
+      containers:
+        - name: bootstrap
+          # Same stdlib-Python image as the Chains bootstrap (the key exists in
+          # values.yaml regardless of chains.enabled) -- one job image in this
+          # component rather than two drifting copies.
+          image: {{ .Values.chains.jobImage }}
+          env:
+            - name: DEFAULT_TIMEOUT_MINUTES
+              value: {{ .Values.platformDefaults.defaultTimeoutMinutes | quote }}
+            - name: ENABLE_CONSOLE_PLUGIN
+              value: {{ if .Values.platformDefaults.consolePlugin.enabled }}"true"{{ else }}"false"{{ end }}
+            - name: ARGOCD_NAMESPACE
+              value: {{ .Values.platformDefaults.argocdController.namespace | quote }}
+            - name: ARGOCD_NAME
+              value: {{ .Values.platformDefaults.argocdController.name | quote }}
+            - name: ARGOCD_CONTROLLER_MEMORY
+              {{- if .Values.platformDefaults.argocdController.enabled }}
+              value: {{ .Values.platformDefaults.argocdController.memoryLimit | quote }}
+              {{- else }}
+              value: ""
+              {{- end }}
+            - name: ARGOCD_CONTROLLER_MEMORY_REQUEST
+              value: {{ .Values.platformDefaults.argocdController.memoryRequest | quote }}
+            - name: PAC_REMOTE_TASKS
+              {{- if .Values.platformDefaults.pacRemoteTasks }}
+              value: {{ .Values.platformDefaults.pacRemoteTasks | quote }}
+              {{- else }}
+              value: ""
+              {{- end }}
+          command: ["python3", "-I", "/scripts/bootstrap.py"]
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts}
+{{- end }}

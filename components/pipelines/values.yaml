@@ -1,0 +1,233 @@
+# OpenShift Pipelines — Lightwell TSSC workshop
+# Required before RHACS Tasks / student .tekton PipelineRuns (Module 5).
+# Root App-of-Apps injects pipelines.* (see bootstrap).
+
+argocd:
+  namespace: openshift-gitops
+
+# Namespace the Tekton layer is installed into -- home of the
+# tekton-cluster-defaults Job and of the objects it patches. Set by
+# bootstrap (its top-level pipelineNamespace); empty in a standalone
+# render, which is fine because the Job is off by default there.
+pipelineNamespace: ""
+
+pipelines:
+  # Chart-level gate (bootstrap Application only exists when components.pipelines.enabled)
+  enabled: true
+  syncWaves:
+    operator: "1"
+    userinfo: "3"
+    # After the operator, because the Job patches the TektonConfig the operator
+    # creates. The Job waits for it rather than assuming it is already there.
+    chains: "4"
+    # Same reasoning as chains: patches operator-owned cluster CRs, and waits
+    # for the TektonConfig the operator creates rather than assuming it.
+    platformConfig: "4"
+    # Last: patches the Tekton layer's cluster-specific param defaults, which
+    # live in a DIFFERENT set of Applications (root-app waves 3-5). Argo does
+    # not order syncs across Applications, so the Job waits for those objects
+    # itself rather than assuming they are already there.
+    clusterDefaults: "5"
+
+# -----------------------------------------------------------------------------
+# Tekton Chains -- image signing + SLSA provenance attestations.
+#
+# The OpenShift Pipelines operator already SHIPS Chains and creates an empty
+# `signing-secrets`. With no key in it, Chains reconciles every TaskRun, marks
+# it `chains.tekton.dev/signed: "true"`, and silently signs nothing -- there is
+# no error anywhere, you just never get a .sig or .att in the registry. That is
+# the failure this section exists to prevent.
+#
+# What you get once configured:
+#   <image>.sig   simplesigning image signature
+#   <image>.att   in-toto SLSA provenance attestation
+#   a Rekor transparency-log entry, recorded on the TaskRun as
+#   `chains.tekton.dev/transparency`
+#
+# Verify with the public key from the Secret:
+#   oc -n openshift-pipelines get secret signing-secrets \
+#     -o jsonpath='{.data.cosign\.pub}' | base64 -d > /tmp/cosign.pub
+#   cosign verify --key /tmp/cosign.pub <image>
+#   cosign verify-attestation --key /tmp/cosign.pub --type slsaprovenance <image>
+# -----------------------------------------------------------------------------
+chains:
+  enabled: true
+  # Where Chains and its signing-secrets live. Fixed by the operator.
+  namespace: openshift-pipelines
+  transparency:
+    # Log signatures to Rekor. Requires RHTAS (components.rhtas) -- turn this
+    # off on a cluster without it, or the Chains controller logs an endless
+    # stream of upload failures.
+    enabled: true
+    # The in-cluster Service, deliberately NOT the Route.
+    url: "http://rekor-server.trusted-artifact-signer.svc"
+  # Same cosign build the buildah-rhtap task uses, so there is one cosign
+  # version in the platform rather than two.
+  cosignImage: registry.redhat.io/rhtas/cosign-rhel9@sha256:6fa39582a3d62a2aa5404397bb638fdd0960f9392db659d033d7bacf70bddfb1
+  # Pure-stdlib Python against the API; no oc, no runtime pip install.
+  jobImage: registry.access.redhat.com/ubi9/python-39:latest
+
+# -----------------------------------------------------------------------------
+# Post-install platform defaults (Job "pipelines-defaults").
+#
+# Both targets are operator-owned, cluster-scoped and heavily defaulted CRs:
+# Argo cannot own them wholesale without fighting the operator that curates
+# them, so the Job merge-patches just these fields on every sync -- the same
+# approach as the Chains bootstrap above.
+# -----------------------------------------------------------------------------
+platformDefaults:
+  # Where the Job, its ConfigMap and its ServiceAccount live. Fixed by the
+  # operator, like chains.namespace.
+  namespace: openshift-pipelines
+  # Tekton's DEFAULT PipelineRun timeout, in minutes. The API server
+  # materializes it into spec.timeouts.pipeline of every run created WITHOUT
+  # an explicit timeouts.pipeline (verified with a server-side dry-run) --
+  # mainly trigger- and CLI-created runs. NOTE it does NOT reach runs that
+  # submit an explicit spec.timeouts.pipeline, and the web console submits
+  # 1h0m0s on every run it starts, so console-started agentic runs keep the
+  # 1h wall no matter what this is set to (start long runs via their trigger
+  # or oc instead). The legacy spec.timeout field does not override this
+  # either -- the admission defaulting overwrites it.
+  #
+  # The stock 60m no longer fits the agentic pipelines: the cve-analysis
+  # upstream tasks alone eat ~40 min at current advisory scale (the RHTPA
+  # remediation report grew from 69s to ~29 min as the must-fix set reached
+  # 236 CVEs), and the model-gated analysis needs another ~45-90 min
+  # depending on gateway speed. Runs that pin their own timeout are
+  # unaffected (ci-build-publish: 1h; test-generation issue runs: 2h).
+  # Set 0 to leave the operator default alone.
+  defaultTimeoutMinutes: 180
+  # OCP 4.15+: the web console shows the Pipelines nav only when
+  # `pipelines-console-plugin` is listed in console.operator/cluster
+  # .spec.plugins -- installing the operator alone never adds it. The Job
+  # merge-patches it in, preserving the plugins already present (a
+  # merge-patch replaces the array, so it sends the full merged list).
+  consolePlugin:
+    enabled: true
+  # The Argo CD application-controller memory limit. The stock openshift-gitops
+  # instance ships 2Gi, which this app-of-apps OOM-kills during the bootstrap
+  # (verified on cluster-dl265: exit 137, Applications stuck Unknown). The
+  # platform-config Job merge-patches the Argocd CR up to this BEFORE the
+  # heavy waves (gitlab 8, quay/rhtpa 10) start -- it only ever raises, so a
+  # deliberately higher limit is left alone. The very first waves (vault,
+  # external-secrets) still run at the stock limit; they are too light to
+  # matter. Set enabled: false on a platform that manages this itself.
+  argocdController:
+    enabled: true
+    namespace: openshift-gitops
+    name: openshift-gitops
+    memoryRequest: 2Gi
+    memoryLimit: 8Gi
+  # PaC remote-tasks resolution. PaC (v0.50.x) resolves a .tekton
+  # PipelineRun's bare pipelineRef/taskRef ONLY from YAML in the same
+  # .tekton/ directory or remote-pipeline/task annotations -- never from
+  # cluster-installed resources -- so "cannot find referenced pipeline" is
+  # what a centrally-installed Pipeline (this demo's model: pipelines/ synced
+  # by Argo) always gets. "false" disables that resolution; PaC then creates
+  # the PipelineRun verbatim and Tekton resolves the refs against the
+  # cluster. Empty leaves the operator default alone.
+  pacRemoteTasks: "false"
+
+# -----------------------------------------------------------------------------
+# Tekton cluster-defaults patch Job ("tekton-cluster-defaults").
+#
+# The Tekton layer at the repo root is synced by Argo as PLAIN YAML, so its
+# cluster-specific values are committed with the reference deployment's
+# hostnames and go stale on every cluster move:
+#   gitops-cd-{dev,qa,prod}  git-host, gitops-url -> gitlab-gitlab.<domain>
+#   ai-agent-config          AI_MODEL, AI_BASE_URL -> ai.model, ai.apiUrl
+#
+# The Job rewrites those values on the LIVE objects from deployer.domain /
+# ai.* on every sync of this component; the bootstrap chart adds
+# ignoreDifferences for exactly those fields to the tekton-pipelines /
+# tekton-config Applications so Argo's selfHeal keeps the patch.
+# Consequence: repo-side edits to those defaults no longer reach a
+# gitops-installed cluster -- change deployer.domain / ai.* instead.
+#
+# `enabled` is turned on by the bootstrap chart (components.pipelines
+# .clusterDefaults, and only when components.tekton is enabled too); a
+# standalone render of this chart has no domain, so it defaults off here.
+# -----------------------------------------------------------------------------
+clusterDefaults:
+  enabled: false
+  # How long the Job waits for the Tekton-layer Applications (waves 4-5) to
+  # produce ai-agent-config and the gitops-cd Pipelines before failing.
+  # Generous on purpose: those Applications can fail their first syncs while
+  # the operator installs CRDs.
+  timeoutSeconds: 1800
+
+# -----------------------------------------------------------------------------
+# AI backend + RHTPA wiring. Non-secret values only -- the API key and the
+# tpa-cli client secret are materialized from Vault by ESO (see
+# templates/externalsecrets.yaml). The model and endpoint are also patched
+# into ai-agent-config by the cluster-defaults Job.
+# -----------------------------------------------------------------------------
+ai:
+  model: gpt-oss-120b-a5b
+  apiUrl: ""
+
+tpa:
+  # The RHTPA console the upload tasks authenticate against.
+  url: ""
+
+oidc:
+  # The Keycloak issuer tpa-secret carries as oidc_issuer_url.
+  issuerUrl: ""
+
+# Vault wiring for the ExternalSecrets this chart renders.
+vault:
+  kvMount: secret
+  pathPrefix: tssc-validated-pattern
+  secretStoreName: vault-cluster
+
+# OLM install into openshift-operators (AllNamespaces; OperatorGroup already exists)
+operator:
+  enabled: true
+  # Subscription metadata.name
+  name: openshift-pipelines-operator
+  # OLM package name
+  packageName: openshift-pipelines-operator-rh
+  namespace: openshift-operators
+  channel: latest
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+  # openshift-operators already has an OperatorGroup — do not create another
+  createOperatorGroup: false
+
+# RHDP userinfo ConfigMap (optional orientation for operators / lab authors)
+userInfo:
+  enabled: true
+  title: "Lightwell TSSC Workshop — OpenShift Pipelines"
+  instructions: >-
+    OpenShift Pipelines provides Tekton CRDs (Pipeline, Task, PipelineRun) used by
+    Module 5 student .tekton overlays and RHACS policy-gate Tasks in stackrox.
+    After the Operator is Ready, confirm: oc get crd pipelines.tekton.dev.
+    Task verify-base-image lives in lightwell-tasks (V2-14). It is not in the
+    seeded spring-boot-lw-poc-build-sign pipeline — wire it before openshift-build.
+    Task conforma-policy and ConfigMap conforma-policy live in lightwell-tasks
+    (V2-15). The seed is too permissive (skip signature checks, CVE 999). Copy
+    the ConfigMap to the lab namespace, tighten it, and wire the Task after
+    cosign-sign-keyless. Task prefetch-dependencies lives in lightwell-tasks
+    (V2-23). It is not Hermeto and is not in the seeded pipeline — wire it
+    before openshift-build after stripping public Central from settings.xml.
+    Do not copy example-pipeline-snippet.yaml.
+
+# Optional sections of the userinfo ConfigMap above. templates/userinfo.yaml
+# reads these unconditionally, so they must exist even when switched off --
+# without them the render dies with "nil pointer evaluating interface {}.enabled"
+# and, because this is sync wave 0, nothing else in the platform ever starts.
+#
+# All three describe Lightwell workshop tasks that ssc-demo does not ship.
+verifyBaseImage:
+  enabled: false
+conformaPolicy:
+  enabled: false
+prefetchDependencies:
+  enabled: false
+
+deployer:
+  # Set by bootstrap from deployer.domain. Left empty here so a stale
+  # hostname cannot quietly end up in the ConfigMap.
+  domain: ""
+  apiUrl: ""

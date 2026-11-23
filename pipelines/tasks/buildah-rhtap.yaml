@@ -16,8 +16,8 @@ spec:
   - description: Reference of the image buildah will produce.
     name: IMAGE
     type: string
-  - default: ./Dockerfile
-    description: Path to the Dockerfile to build.
+  - default: ./Containerfile
+    description: Path to the Containerfile to build.
     name: DOCKERFILE
     type: string
   - default: .
@@ -107,14 +107,14 @@ spec:
         update-ca-trust
       fi
 
-      # Check if the Dockerfile exists
+      # Check if the Containerfile exists
       SOURCE_CODE_DIR=source
       if [ -e "$SOURCE_CODE_DIR/$CONTEXT/$DOCKERFILE" ]; then
         dockerfile_path="$SOURCE_CODE_DIR/$CONTEXT/$DOCKERFILE"
       elif [ -e "$SOURCE_CODE_DIR/$DOCKERFILE" ]; then
         dockerfile_path="$SOURCE_CODE_DIR/$DOCKERFILE"
       else
-        echo "Cannot find Dockerfile $DOCKERFILE"
+        echo "Cannot find Containerfile $DOCKERFILE"
         exit 1
       fi
 

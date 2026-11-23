@@ -1,0 +1,6 @@
+apiVersion: v2
+name: artifactory
+description: Artifactory OSS OpenShift extras — custom SCC, Route, first-boot repo bootstrap, Vault-backed secrets, and the maven-settings sync Job
+type: application
+version: 0.0.0
+appVersion: "1.0.0"
