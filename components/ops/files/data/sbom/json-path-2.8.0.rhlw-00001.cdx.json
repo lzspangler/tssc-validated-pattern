@@ -1,0 +1,43 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:67128568-c3dd-5761-8ebb-df888c64311b",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-11-01T00:00:00Z",
+    "tools": [
+      {
+        "vendor": "Lightwell",
+        "name": "lightwell-remediation-catalog",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "pkg:maven/com.jayway.jsonpath/json-path@2.8.0.rhlw-00001",
+      "group": "com.jayway.jsonpath",
+      "name": "json-path",
+      "version": "2.8.0.rhlw-00001",
+      "purl": "pkg:maven/com.jayway.jsonpath/json-path@2.8.0.rhlw-00001",
+      "properties": [
+        {
+          "name": "lightwell:tier",
+          "value": "remediated"
+        },
+        {
+          "name": "lightwell:baseVersion",
+          "value": "2.8.0"
+        },
+        {
+          "name": "lightwell:remediatedVersion",
+          "value": "2.8.0.rhlw-00001"
+        },
+        {
+          "name": "lightwell:osvId",
+          "value": "LW-DEMO-0021"
+        }
+      ]
+    }
+  },
+  "components": []
+}

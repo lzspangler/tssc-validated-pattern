@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.6.0",
+  "id": "LW-DEMO-0022",
+  "aliases": [
+    "CVE-2023-5072"
+  ],
+  "modified": "2026-11-01T00:00:00Z",
+  "published": "2026-11-01T00:00:00Z",
+  "summary": "Lightwell backport remediation for CVE-2023-5072 (org.json:json)",
+  "details": "Denial of service via crafted JSON input causing excessive memory allocation during parsing. Lightwell backports the fix onto the 20220320 line.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Maven",
+        "name": "org.json:json",
+        "purl": "pkg:maven/org.json/json@20220320"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "20220320.0.0.rhlw-00003"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "20220320"
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://packages.redhat.com/lightwell/osv/java/remediated"
+    }
+  ]
+}
