@@ -118,6 +118,15 @@ platformDefaults:
     name: openshift-gitops
     memoryRequest: 2Gi
     memoryLimit: 8Gi
+  # PaC remote-tasks resolution. PaC (v0.50.x) resolves a .tekton
+  # PipelineRun's bare pipelineRef/taskRef ONLY from YAML in the same
+  # .tekton/ directory or remote-pipeline/task annotations -- never from
+  # cluster-installed resources -- so "cannot find referenced pipeline" is
+  # what a centrally-installed Pipeline (this demo's model: pipelines/ synced
+  # by Argo) always gets. "false" disables that resolution; PaC then creates
+  # the PipelineRun verbatim and Tekton resolves the refs against the
+  # cluster. Empty leaves the operator default alone.
+  pacRemoteTasks: "false"
 
 # -----------------------------------------------------------------------------
 # Tekton cluster-defaults patch Job ("tekton-cluster-defaults").

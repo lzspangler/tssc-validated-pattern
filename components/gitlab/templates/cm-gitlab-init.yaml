@@ -498,9 +498,17 @@ data:
           register: r_pac_webhook
 
         - name: Store the PaC webhook secret
+          # The existence check MUST read the key this Secret actually
+          # carries: webhook-secret. It previously read `secretToken` (the
+          # EventListener secret's key), which is always absent here -- so
+          # the condition was permanently true and the task REGENERATED the
+          # shared secret on every run, once PER REPOSITORY. Each run ended
+          # with the first repo's GitLab webhook holding a token from
+          # before the last repo's regeneration, and every event for it
+          # failed "token does not match configured secret".
           when: >-
             r_pac_webhook.resources | length == 0
-            or r_pac_webhook.resources[0].data.secretToken | default('') | length == 0
+            or r_pac_webhook.resources[0].data["webhook-secret"] | default('') | length == 0
           kubernetes.core.k8s:
             state: present
             definition:
