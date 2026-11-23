@@ -250,10 +250,12 @@ data:
               - 200
               - 404
           register: r_repo_commits
-          # 404 means the repo is empty (no branch, no commits)
+          # 200 with an empty array means the repo has no commits
 
         - name: Populate {{ $repo.name }} from {{ $repo.source }}
-          when: r_import.status == 201 or (r_repo_commits.status | default(0)) == 404
+          # GitLab returns 200 with an EMPTY ARRAY for a repo with no
+          # commits (not 404), so check the body, not the status code.
+          when: r_import.status == 201 or (r_repo_commits.json | default([]) | length) == 0
           ansible.builtin.shell: |
             set -e
             SOURCE_DIR="/tmp/repo/{{ $repo.source }}"
