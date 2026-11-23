@@ -206,6 +206,8 @@ class Deployment:
         self.config = None
         self.apps = []
         self.source_revision = None
+        self.layout = None
+        self.repo_url = None
         self.route_forward = None
         self.skip_quay_noobaa_preflight = False
         self.keycloak_route_override = False
@@ -256,7 +258,7 @@ class Deployment:
                 raise DeploymentError(f"Application {namespace}/{name} sync failed; inspect its Argo sync operation")
             revision = getattr(self, "source_revision", None)
             source = app.get("spec", {}).get("source", {})
-            from_selected_repo = self.config and source.get("repoURL") == self.config["gitops"]["repoUrl"]
+            from_selected_repo = self.config and source.get("repoURL") == self.repo_url
             synced = (status.get("sync", {}).get("status") == "Synced" and status.get("health", {}).get("status") == "Healthy"
                       and operation.get("phase") == "Succeeded" and not live.get("operation")
                       and (not revision or not from_selected_repo or status.get("sync", {}).get("revision") == revision))
@@ -278,7 +280,7 @@ class Deployment:
                 raise DeploymentError(f"Application {namespace}/{name} sync failed; inspect its Argo sync operation")
             revision = getattr(self, "source_revision", None)
             source = app.get("spec", {}).get("source", {})
-            from_selected_repo = self.config and source.get("repoURL") == self.config["gitops"]["repoUrl"]
+            from_selected_repo = self.config and source.get("repoURL") == self.repo_url
             applied = (status.get("sync", {}).get("status") == "Synced"
                        and operation.get("phase") == "Succeeded" and not live.get("operation")
                        and (not revision or not from_selected_repo or status.get("sync", {}).get("revision") == revision))
@@ -394,6 +396,8 @@ class Deployment:
             targets.add((prerequisites["namespace"], prerequisites.get("caConfigMap", "ssc-router-ca")))
         if rhtpa.get("enabled"):
             targets.add((rhtpa["namespace"], rhtpa.get("serverCaConfigMap", "ssc-router-ca")))
+        if self.components.get("ops", {}).get("enabled"):
+            targets.add((self.ns, prerequisites.get("caConfigMap", "ssc-router-ca")))
         targets = {(namespace, name) for namespace, name in targets if name}
         if not targets:
             return
@@ -472,12 +476,31 @@ class Deployment:
     def prepare_source(self, source):
         base = self.override.get("gitops", {}).get("basePath", "automation/gitops")
         require(not Path(base).is_absolute() and ".." not in Path(base).parts, "gitops.basePath must stay inside the source checkout")
-        chart = source / base / "bootstrap-infra"
-        self.config = merge(load_yaml(chart / "values.yaml"), self.override)
+        legacy_chart = source / base / "bootstrap-infra"
+        field_chart = source / "bootstrap"
+        if (legacy_chart / "values.yaml").is_file():
+            self.layout = "legacy"
+            chart = legacy_chart
+            component_base = source / base
+        elif (field_chart / "values.yaml").is_file():
+            self.layout = "field-source"
+            chart = field_chart
+            component_base = source / "components"
+        else:
+            raise DeploymentError("Source must contain either bootstrap/values.yaml or automation/gitops/bootstrap-infra/values.yaml")
+        chart_defaults = load_yaml(chart / "values.yaml")
+        self.config = merge(chart_defaults, self.override)
         config = self.config
+        local_gitops_override = self.override.get("gitops", {})
+        if (self.layout == "field-source" and "repoUrl" in local_gitops_override
+                and "repoURL" not in local_gitops_override):
+            # Legacy remote values must not retarget local field-source plans.
+            config["gitops"]["revision"] = chart_defaults["gitops"]["revision"]
         self.domain = config["deployer"]["domain"]
         require(valid_domain(self.domain), "Set deployer.domain to the real apps subdomain")
-        require(safe_url(config["gitops"]["repoUrl"]), "gitops.repoUrl must be a credential-free HTTPS URL")
+        self.repo_url = (config["gitops"].get("repoUrl") if self.layout == "legacy"
+                         else config["gitops"].get("repoURL"))
+        require(safe_url(self.repo_url), "Configured GitOps repository URL must be credential-free HTTPS")
         require(config["gitops"]["revision"], "Set gitops.revision to a remote branch or tag")
         self.argo_ns = config["argocd"]["namespace"]
         self.ns = config["pipelineNamespace"]
@@ -487,47 +510,66 @@ class Deployment:
         require(self.components["tekton"]["enabled"] and self.components["pipelines"]["enabled"],
                 "This full-demo coordinator requires the existing Pipelines and Tekton components")
         af = config.get("deployment", {}).get("artifactory", {})
-        require(all(isinstance(af.get(key), str) and af[key] and "REPLACE_ME" not in af[key] for key in AF_PASSWORDS),
-                "deployment.artifactory requires all five durable credentials; use --init-values for a fresh deployment")
-        require(all(re.fullmatch(r"[a-fA-F0-9]+", af[key]) and len(af[key]) in (32, 64) for key in ("masterKey", "joinKey")),
-                "Artifactory masterKey/joinKey must be 32- or 64-character hex strings")
+        if self.layout == "legacy":
+            require(all(isinstance(af.get(key), str) and af[key] and "REPLACE_ME" not in af[key] for key in AF_PASSWORDS),
+                    "deployment.artifactory requires all five durable credentials; use --init-values for a fresh deployment")
+            require(all(re.fullmatch(r"[a-fA-F0-9]+", af[key]) and len(af[key]) in (32, 64) for key in ("masterKey", "joinKey")),
+                    "Artifactory masterKey/joinKey must be 32- or 64-character hex strings")
         orchestrator_opt_in = self.override.get("components", {}).get("orchestrator", {}).get("enabled") is True
         if self.components["orchestrator"]["enabled"]:
+            workflow_dir = (source / "orchestration" if self.layout == "legacy"
+                            else source / "components/orchestrator/workflows")
             for filename in ("remediate_and_promote_gitlab.json", "remediate_next_gitlab.json"):
-                require((source / "orchestration" / filename).is_file(),
-                        f"Orchestrator is enabled but source lacks orchestration/{filename}; supply the workflow source or explicitly disable the component")
+                require((workflow_dir / filename).is_file(),
+                        f"Orchestrator is enabled but source lacks {workflow_dir.relative_to(source)}/{filename}; supply workflows or explicitly disable the component")
         helm_command = ["helm", "template", "ssc", str(chart), "-f", str(self.values)]
         helm_command.extend(coordinator_overrides)
+        if (self.layout == "field-source" and "repoUrl" in local_gitops_override
+                and "repoURL" not in local_gitops_override):
+            helm_command.extend(["--set", f"gitops.revision={chart_defaults['gitops']['revision']}"])
         rendered = run(helm_command, timeout=120)
         self.apps = [doc for doc in yaml.safe_load_all(rendered) if doc]
         require(self.apps and all(isinstance(doc, dict) and doc.get("kind") == "Application" for doc in self.apps), "Bootstrap must render only Argo CD Applications")
-        prerequisite_values_path = source / base / "components/rhtpa/tpa-prerequisites/values.yaml"
+        prerequisite_values_path = (source / base / "components/rhtpa/tpa-prerequisites/values.yaml"
+                                    if self.layout == "legacy"
+                                    else component_base / "rhtpa-prerequisites/values.yaml")
         prerequisite_values = yaml.safe_load(prerequisite_values_path.read_text()) if prerequisite_values_path.is_file() else {}
         self.rhtpa_hook_ca_enabled = (
             "caConfigMap" in prerequisite_values.get("oidc", {})
             and bool(self.components["rhtpaPrerequisites"].get("caConfigMap", "ssc-router-ca")))
-        if self.components["keycloak"]["enabled"]:
+        keycloak_enabled = (self.components.get("keycloak", {}).get("enabled", False)
+                            if self.layout == "legacy" else self.components.get("keycloakClients", {}).get("enabled", False))
+        if keycloak_enabled and self.layout == "legacy":
             keycloak_app = next((app for app in self.apps if app["metadata"]["name"] == "ssc-keycloak"), None)
             require(keycloak_app, "Keycloak is enabled but its Application was not rendered")
             values = keycloak_app["spec"]["source"]["helm"]["valuesObject"]
             values.setdefault("keycloak", {}).setdefault("route", {})["host"] = f"sso.{config['deployer']['domain']}"
             self.keycloak_route_override = True
         require("REPLACE_ME" not in json.dumps(self.apps), "Enabled components still contain REPLACE_ME credentials/configuration")
-        af_dir = source / base / "artifactory"
-        self.extras = [doc for doc in yaml.safe_load_all((af_dir / "openshift-extras.yaml").read_text()) if doc and doc.get("kind") != "Secret"]
-        self.af_app = load_yaml(af_dir / "application-artifactory.yaml")
-        self.af_app["metadata"]["namespace"] = self.argo_ns
+        self.extras = []
+        self.af_app = None
+        if self.layout == "legacy":
+            af_dir = source / base / "artifactory"
+            self.extras = [doc for doc in yaml.safe_load_all((af_dir / "openshift-extras.yaml").read_text()) if doc and doc.get("kind") != "Secret"]
+            self.af_app = load_yaml(af_dir / "application-artifactory.yaml")
+            self.af_app["metadata"]["namespace"] = self.argo_ns
         self.source = source
-        self.base = base
+        self.base = component_base
         self.ai = load_yaml(source / config["gitops"].get("tektonPath", "pipelines") / "config/ai-agent-config.yaml")["data"]
         provider = self.ai.get("AI_PROVIDER", "openai")
-        require(provider in ("openai", "anthropic"), "Coordinator credential initialization currently supports openai/anthropic; configure other providers manually")
-        self.ai_key = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
-        self.artifactory_secrets = {
+        if provider in ("openai", "anthropic"):
+            self.ai_key = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+        else:
+            require(self.layout != "legacy",
+                    "Coordinator credential initialization currently supports openai/anthropic; configure other providers manually")
+            self.ai_key = None
+        self.artifactory_secrets = ({
             "artifactory-admin": {"password": "admin@*=" + af["adminPassword"]},
             "artifactory-keys": {"master-key": af["masterKey"], "join-key": af["joinKey"]},
             "artifactory-postgresql": {"postgres-password": af["postgresPassword"], "password": af["appPassword"]},
-        }
+        } if self.layout == "legacy" else {})
+        self.realm = (config.get("components", {}).get("keycloak", {}).get("realm")
+                      if self.layout == "legacy" else config.get("keycloak", {}).get("realm")) or "backstage"
 
     def coordinator_helm_overrides(self):
         private_components = self.override.get("components", {})
@@ -543,18 +585,22 @@ class Deployment:
 
     def show_plan(self):
         print("Plan only: no cluster access, remote-source verification, or resource changes.")
-        print("1. Verify source/configuration, cluster identity/health, storage, and existing credentials.")
-        print("2. Reuse/install GitOps; explicitly prepare demo controller privileges and memory.")
-        print("3. Preserve Artifactory secrets; apply existing non-secret extras and Application; wait for readiness.")
-        print("4. Apply existing bootstrap Applications; initialize missing runtime secrets; wait for platform health.")
-        print("5. Validate seeded credentials and test-generation resources; load/verify remediation data when enabled.")
-        print("6. Report application environments awaiting their first published image; smoke runs are opt-in.")
+        if self.layout == "legacy":
+            print("1. Verify source/configuration, cluster identity/health, storage, and existing credentials.")
+            print("2. Reuse/install GitOps; explicitly prepare demo controller privileges and memory.")
+            print("3. Preserve Artifactory secrets; apply existing non-secret extras and Application; wait for readiness.")
+            print("4. Apply existing bootstrap Applications; initialize missing runtime secrets; wait for platform health.")
+            print("5. Validate seeded credentials and test-generation resources; load/verify remediation data when enabled.")
+            print("6. Report application environments awaiting their first published image; smoke runs are opt-in.")
+        else:
+            print("Current source uses the RHDP field-sourced layout; deployment is owned by the bootstrap Application.")
+            print("The optional legacy apply coordinator refuses this layout rather than mutate an unsupported deployment.")
         print("Applications: " + ", ".join(app["metadata"]["name"] for app in self.apps))
         print("Apply fetches the configured remote revision again; local plan success does not verify that remote revision.")
 
     def cleanup_plan(self):
         """Inventory cleanup boundaries only; labels/tracking do not prove creation ownership."""
-        config = merge(load_yaml(ROOT / "automation/gitops/bootstrap-infra/values.yaml"), self.override)
+        config = merge(load_yaml(ROOT / "bootstrap/values.yaml"), self.override)
         domain = config["deployer"]["domain"]
         require(valid_domain(domain), "Set deployer.domain before inspecting cleanup targets")
         self.oc("whoami")
@@ -566,7 +612,14 @@ class Deployment:
         argo_ns = config["argocd"]["namespace"]
         protected = {"default", argo_ns, "openshift-storage", "openshift-operators", "openshift-pipelines"}
         protected.update(components[name]["namespace"] for name in
-                         ("odf", "pipelines", "keycloak", "keycloakClients", "orchestrator"))
+                         ("odf", "pipelines", "keycloak", "keycloakClients", "orchestrator", "externalSecrets")
+                         if name in components and components[name].get("namespace"))
+        if components.get("externalSecrets", {}).get("controllerNamespace"):
+            protected.add(components["externalSecrets"]["controllerNamespace"])
+        for name in ("keycloak", "vault"):
+            namespace = config.get(name, {}).get("namespace")
+            if namespace:
+                protected.add(namespace)
 
         def preserve_namespace(namespace):
             return namespace in protected or namespace.startswith(("openshift-", "kube-"))
@@ -578,8 +631,11 @@ class Deployment:
                     "finalizers": metadata.get("finalizers", [])}
 
         namespaces = {config["pipelineNamespace"], "artifactory", argo_ns, "openshift-pipelines"}
+        namespaces.update(config[name]["namespace"] for name in ("keycloak", "vault")
+                          if config.get(name, {}).get("namespace"))
         namespaces.update(component["namespace"] for component in components.values() if "namespace" in component)
-        namespaces.update(env["namespace"] for env in components["appEnvironments"].get("environments", []))
+        namespaces.update(env["namespace"] for env in components.get("appEnvironments", {}).get("environments", []))
+        namespaces.update(env["namespace"] for env in components.get("appEnvironments", {}).get("lightwellEnvironments", {}).get("environments", []))
         apps = []
         if self.get("crd", "applications.argoproj.io"):
             apps = (self.get("applications", namespace=argo_ns) or {}).get("items", [])
@@ -588,8 +644,8 @@ class Deployment:
             metadata = app["metadata"]
             labels = metadata.get("labels", {})
             name = metadata["name"]
-            if not (labels.get("app.kubernetes.io/part-of") == "ssc-demo"
-                    or labels.get("demo.redhat.com/application") == "ssc-demo"
+            if not (labels.get("app.kubernetes.io/part-of") in ("ssc-demo", "tssc-validated-pattern")
+                    or labels.get("demo.redhat.com/application") in ("ssc-demo", "tssc-validated-pattern")
                     or name == "artifactory"):
                 continue
             target = app.get("spec", {}).get("destination", {})
@@ -597,7 +653,8 @@ class Deployment:
             local_cluster = target.get("server") == "https://kubernetes.default.svc" or target.get("name") == "in-cluster"
             if destination and local_cluster:
                 namespaces.add(destination)
-            keep = (not local_cluster or name in ("ssc-odf", "ssc-pipelines", "ssc-keycloak", "ssc-keycloak-clients", "ssc-orchestrator")
+            keep = (not local_cluster or name in ("ssc-odf", "ssc-pipelines", "ssc-keycloak", "ssc-keycloak-clients", "ssc-orchestrator",
+                                                   "keycloak-clients", "orchestrator", "vault", "external-secrets")
                     or (destination and preserve_namespace(destination)))
             row = identity(app)
             row.update({"decision": "KEEP" if keep else "REVIEW",
@@ -637,7 +694,7 @@ class Deployment:
         for resource in self.get("clusterroles,clusterrolebindings,securitycontextconstraints")["items"]:
             metadata = resource["metadata"]
             if (metadata["name"] not in cluster_names
-                    and metadata.get("labels", {}).get("app.kubernetes.io/part-of") not in ("ssc-demo", "maven-build-ci")
+                    and metadata.get("labels", {}).get("app.kubernetes.io/part-of") not in ("ssc-demo", "tssc-validated-pattern", "maven-build-ci")
                     and metadata.get("labels", {}).get("app.kubernetes.io/managed-by") != "ssc-demo-cluster"):
                 continue
             row = identity(resource)
@@ -792,7 +849,7 @@ class Deployment:
                         f"Application {namespace}/{name} differs from selected runbook inputs; review/reconcile it explicitly before rerunning")
         else:
             self.apply([app])
-        if (self.source_revision and app["spec"]["source"].get("repoURL") == self.config["gitops"]["repoUrl"]
+        if (self.source_revision and app["spec"]["source"].get("repoURL") == self.repo_url
                 and (not existing or not self.contains(existing["spec"], app["spec"])
                      or existing.get("status", {}).get("sync", {}).get("revision") != self.source_revision)):
             self.oc("-n", namespace, "annotate", "application", name,
@@ -800,7 +857,7 @@ class Deployment:
         if (existing and not existing.get("operation")
                 and existing.get("status", {}).get("operationState", {}).get("phase") in ("Failed", "Error")):
             source = app["spec"]["source"]
-            revision = (self.source_revision if source.get("repoURL") == self.config["gitops"]["repoUrl"]
+            revision = (self.source_revision if source.get("repoURL") == self.repo_url
                         else None) or source.get("targetRevision", "HEAD")
             self.oc("-n", namespace, "patch", "application", name, "--type=merge",
                     "-p", json.dumps({"operation": {"initiatedBy": {"username": "ssc-demo-deploy"},
@@ -1243,6 +1300,8 @@ def main(argv=None):
                 source = Path(directory) / "source"
                 run(["git", "clone", "--quiet", "--depth", "1", "--branch", remote["revision"], remote["repoUrl"], str(source)], timeout=180)
                 deployment.prepare_source(source)
+                require(deployment.layout == "legacy",
+                        "--apply currently targets the configured legacy ssc-demo GitOps source; deploy the RHDP field-sourced layout through its bootstrap Application")
                 deployment.source_revision = run(["git", "-C", str(source), "rev-parse", "HEAD"]).strip()
                 deployment.deploy()
         return 0

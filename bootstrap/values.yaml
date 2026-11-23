@@ -214,6 +214,9 @@ components:
     enabled: true
     namespace: trusted-profile-analyzer
     syncWave: "10"
+    # Manual public-CA installs leave this empty. The coordinator sets its
+    # ConfigMap explicitly; manual private-CA installs may opt in.
+    caConfigMap: ""
 
   # Red Hat Automation Orchestrator + the two remediation workflows.
   orchestrator:
@@ -229,6 +232,10 @@ components:
     channel: stable-v3
     createOperatorGroup: true
     routeTimeout: 300s
+    serverCaConfigMap: ssc-router-ca
+    scheduling:
+      preferredCpuRequest: "1"
+      fallbackCpuRequest: "100m"
     storage:
       type: s3
       bucket: trustify

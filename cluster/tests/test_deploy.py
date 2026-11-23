@@ -26,6 +26,7 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.instance = object.__new__(deploy.Deployment)
         self.instance.args = SimpleNamespace(timeout=30)
         self.instance.config = {"gitops": {"repoUrl": "https://example.test/demo.git"}}
+        self.instance.repo_url = "https://example.test/demo.git"
         self.instance.source_revision = "fixed-revision"
         self.instance.source = ROOT
         self.instance.ns = "tssc-app-ci"
@@ -77,7 +78,7 @@ class DeploymentSafetyTests(unittest.TestCase):
                     self.assertEqual(operation["sync"], {"revision": "fixed-revision", "prune": False})
 
     def test_manual_chart_keeps_rhtpa_ca_mount_opt_in(self):
-        values = deploy.load_yaml(ROOT / "automation/gitops/bootstrap-infra/values.yaml")
+        values = deploy.load_yaml(ROOT / "bootstrap/values.yaml")
         self.assertEqual(values["components"]["rhtpaPrerequisites"]["caConfigMap"], "")
 
     def test_coordinator_explicitly_supplies_ca_configmap_and_disables_orchestrator(self):

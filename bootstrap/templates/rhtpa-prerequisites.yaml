@@ -26,6 +26,7 @@ spec:
           bucketName: {{ .Values.components.rhtpaOperator.storage.bucket | quote }}
         oidc:
           issuerUrl: {{ include "bootstrap.issuer" . | quote }}
+          caConfigMap: {{ .Values.components.rhtpaPrerequisites.caConfigMap | quote }}
         vault:
           kvMount: {{ .Values.vault.kvMount | quote }}
           pathPrefix: {{ .Values.vault.pathPrefix | quote }}

@@ -1,13 +1,12 @@
 # Cluster Helpers
 
-Adapted from `ssc-demo-fp` commits `17b758e` and `7712272` for this repository's
-existing `openshift-gitops` instance and three test-generation pipelines.
-The [runbook](../automation/gitops/RUNBOOK.md) remains authoritative for
-deployment, credentials, CA trust, Argo CD permissions, and component choices.
-Its manual deployment path, existing charts/defaults, and GitLab issue/push
-triggers remain available and unchanged. The full-deployment coordinator below
-is optional and opt-in; running the cluster helper without flags is still
-read-only. No helper changes the default StorageClass.
+Adapted from `ssc-demo-fp` commits `17b758e` and `7712272` for optional legacy
+demo deployment helpers. The current RHDP field-sourced deployment is documented
+in [`RUNBOOK.md`](../RUNBOOK.md) and remains owned by its `bootstrap/`
+Application. The `--apply` coordinator targets a separately configured legacy
+`ssc-demo` source and refuses to apply this repository's field-sourced layout.
+Running the cluster helper without flags is read-only. No helper changes the
+default StorageClass.
 
 ## Read-Only Preflight
 
@@ -74,11 +73,11 @@ default `15m` per bootstrap/preparation stage. Health checks retain the optional
 
 ## Optional Full Deployment
 
-`ssc-demo-deploy.py` coordinates the existing runbook: GitOps bootstrap and
-explicit demo preparation, standalone Artifactory, bootstrap Applications,
-runtime credentials, readiness checks, and remediation data load/verification.
-It does not replace the manual path, change AI configuration, or start a smoke
-build unless requested. Run examples from the repository root.
+`ssc-demo-deploy.py` can coordinate the separately configured legacy `ssc-demo`
+source: GitOps bootstrap/preparation, Artifactory, ordered Applications,
+credentials, readiness, and remediation data. It is not the deployment command
+for this repository's RHDP field-sourced chart. It does not change AI
+configuration or start a smoke build unless requested.
 
 ### Local Setup And Private Values
 
@@ -212,13 +211,11 @@ repository configuration, and OIDC/RHTPA API access are also gated, even with
 subprocess output is withheld, including errors; never enable credential logging
 to diagnose a failure. This is not a transactional install or automatic rollback.
 
-With RHTPA enabled, the coordinator reuses
-`pipelines/ops/rhtpa-load-lightwell-data.sh` to load and verify remediation data.
-It runs `--verify` first and skips uploads when the expected data is already
-present. Missing or incomplete data triggers a load and verification. A partial
-load can re-upload documents and create new import versions; the newest `modified`
-record wins. `--skip-data` explicitly skips both loading and verification and
-logs that skip; remediation data remains unverified. The coordinator does not
+With RHTPA enabled, the legacy coordinator uses the verified loader from its
+selected source, checking first and skipping uploads when expected data is
+already present. The field-sourced layout runs the chart-managed `ops` Job
+instead. `--skip-data` explicitly skips both loading and verification for the
+legacy coordinator and logs that skip; remediation data remains unverified. The coordinator does not
 pass `--insecure`: remote fetches, runtime probes, and loader HTTPS calls retain
 TLS verification and fail on trust issues. When workstation DNS cannot resolve
 cluster routes, runtime probes open a temporary port-forward to a Ready ingress
@@ -374,8 +371,8 @@ are generated or stored locally.
 ## Local Validation
 
 ```bash
-bash -n cluster/ssc-demo-cluster.sh cluster/ssc-demo-actions.sh pipelines/ops/rhtpa-load-lightwell-data.sh
-shellcheck cluster/ssc-demo-cluster.sh cluster/ssc-demo-actions.sh pipelines/ops/rhtpa-load-lightwell-data.sh
+bash -n cluster/ssc-demo-cluster.sh cluster/ssc-demo-actions.sh
+shellcheck cluster/ssc-demo-cluster.sh cluster/ssc-demo-actions.sh
 "$HOME/.venvs/ssc-demo/bin/python" -B cluster/ssc-demo-deploy.py --plan --values "$SSC_VALUES"
 "$HOME/.venvs/ssc-demo/bin/python" -B -m unittest discover -s cluster/tests -v
 ```

@@ -40,6 +40,10 @@ tpa:
 oidc:
   issuerUrl: ""
 
+# Optional public ingress CA for verified in-cluster Route requests.
+tls:
+  caConfigMap: ""
+
 # Vault wiring for the ExternalSecret (reads tpa-secret).
 vault:
   kvMount: secret
