@@ -47,11 +47,21 @@ The install assumes the cluster ships, and installs none of:
 * **an AI API key** for the `gpt-oss-120b-a5b` model (RHDP order form /
   deployer-injected, or pre-loaded in Vault)
 
-## Ordering
 
-Order **Field Sourced Content - OpenShift (Dedicated Clusters)** from RHDP
-with this repository (or a fork), revision `main`, path `bootstrap`. The
-deployer injects `deployer.domain`; everything else derives from it. See
-[RUNBOOK.md](RUNBOOK.md) for the full walk-through, and
-[bootstrap/README.md](bootstrap/README.md) for why each component is shaped
-the way it is.
+## Provisioning via Red Hat Demo Platform Field Source Content
+
+1. Order the **Field Sourced Content - OpenShift (Dedicated Clusters)** CI from [Red Hat Demo Platform](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod&utm_source=webapp&utm_medium=share-link).
+2. Select the following options:
+* Cloud Provider: CNV
+* Cluster Size: Multinode
+* OpenShift Worker Count: 4
+* OpenShift Worker memory: 32Gi
+* OpenShift Worker CPU: 16
+* Existing GitOps Repo
+  * GitOps Repo: https://github.com/project-lightpath/tssc-validated-pattern (or a fork)
+  * GitOps Revision: main
+  * GitOps Path: bootstrap
+* Select "Enable LiteMaaS/MaaS API Keys (for AI/LLM demos)" (under "AI/LLM Configuration")
+  * Model: gpt-oss-120b-a5b
+  * Expiry: 30d
+
