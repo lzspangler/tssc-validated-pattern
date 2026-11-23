@@ -585,7 +585,15 @@ data:
                 labels:
                   app.kubernetes.io/part-of: tssc-validated-pattern
               spec:
-                url: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}.git
+                # NO .git suffix: PaC (v0.50.x) matches the event URL with an
+                # EXACT string compare (trailing "/" only) against
+                # spec.url, and GitLab's webhook payload carries the
+                # project's web_url, which has no .git. A .git-suffixed
+                # Repository CR never matches any event -- every push logs
+                # "cannot find a repository match" and no PipelineRun is
+                # created. The clone URL PaC uses comes from the event
+                # payload, not from this field, so dropping .git is safe.
+                url: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}
                 git_provider:
                   type: gitlab
                   url: https://{{ $host }}
