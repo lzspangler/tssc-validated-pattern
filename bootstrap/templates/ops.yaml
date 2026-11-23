@@ -8,6 +8,7 @@
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+{{ include "bootstrap.metadata" (dict "name" "ops" "namespace" .Values.argocd.namespace "syncWave" $ops.syncWave "root" .) }}
 spec:
   project: {{ .Values.argocd.project }}
   source:
@@ -30,5 +31,4 @@ spec:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.pipelineNamespace }}
   {{- include "bootstrap.syncPolicy" . | nindent 2 }}
-{{- include "bootstrap.metadata" (dict "name" "ops" "namespace" .Values.argocd.namespace "syncWave" $ops.syncWave "root" .) }}
 {{- end }}

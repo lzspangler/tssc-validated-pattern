@@ -82,13 +82,13 @@ LLM key as litemaas.* (the x2a-fsc convention); ai.* is this chart's own
 spelling. ai.* wins when both are set, litemaas.* is the fallback.
 */}}
 {{- define "bootstrap.aiApiKey" -}}
-{{- .Values.ai.apiKey | default .Values.litemaas.apiKey | default "" -}}
+{{- .Values.ai.apiKey | default ((.Values.litemaas | default dict).apiKey) | default "" -}}
 {{- end -}}
 
 {{- define "bootstrap.aiApiUrl" -}}
-{{- .Values.ai.apiUrl | default .Values.litemaas.apiUrl | default "" -}}
+{{- .Values.ai.apiUrl | default ((.Values.litemaas | default dict).apiUrl) | default "" -}}
 {{- end -}}
 
 {{- define "bootstrap.aiModel" -}}
-{{- .Values.ai.model | default .Values.litemaas.model | default "gpt-oss-120b-a5b" -}}
+{{- .Values.ai.model | default ((.Values.litemaas | default dict).model) | default "gpt-oss-120b-a5b" -}}
 {{- end -}}
