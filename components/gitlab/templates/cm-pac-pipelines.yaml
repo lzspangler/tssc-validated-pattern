@@ -54,7 +54,12 @@ data:
     apiVersion: tekton.dev/v1
     kind: PipelineRun
     metadata:
-      name: ci-build-publish
+      # generateName, NOT name: with remote-tasks resolution disabled (see
+      # the pipelines-defaults Job), PaC creates this PipelineRun verbatim,
+      # and a fixed name collides on the second event ("pipelineruns.tekton.dev
+      # ... already exists") -- the first run keeps the name forever.
+      # generateName gives every event a unique run (ci-build-publish-xxxxx).
+      generateName: ci-build-publish-
       annotations:
         pipelinesascode.tekton.dev/on-event: "[push]"
         pipelinesascode.tekton.dev/on-target-branch: "[main]"
@@ -94,7 +99,9 @@ data:
     apiVersion: tekton.dev/v1
     kind: PipelineRun
     metadata:
-      name: pull-request-verify
+      # generateName for the same reason as push-ci.yaml above: every MR
+      # event needs its own uniquely-named run.
+      generateName: pull-request-verify-
       annotations:
         pipelinesascode.tekton.dev/on-event: "[pull_request]"
         pipelinesascode.tekton.dev/on-target-branch: "[main]"
@@ -163,7 +170,9 @@ data:
     apiVersion: tekton.dev/v1
     kind: PipelineRun
     metadata:
-      name: generate-tests-unit
+      # generateName for the same reason as push-ci.yaml above: every
+      # matching comment needs its own uniquely-named run.
+      generateName: generate-tests-unit-
       annotations:
         pipelinesascode.tekton.dev/on-event: "[pull_request_comment]"
         pipelinesascode.tekton.dev/on-target-branch: "[main]"
