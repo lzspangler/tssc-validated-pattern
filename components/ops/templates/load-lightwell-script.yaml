@@ -136,6 +136,11 @@ data:
     CHECKS = [
         ("maven/org.apache.commons/commons-lang3", "3.14.0.rhlw-00001"),
         ("maven/com.fasterxml.woodstox/woodstox-core", "6.0.3.rhlw-00001"),
+        ("maven/com.jayway.jsonpath/json-path", "2.8.0.rhlw-00001"),
+        ("maven/org.json/json", "20220320.0.0.rhlw-00003"),
+        ("maven/org.springframework/spring-core", "5.3.18.rhlw-00010"),
+        ("maven/org.springframework/spring-expression", "5.3.18.rhlw-00010"),
+        ("maven/org.springframework/spring-webmvc", "5.3.18.rhlw-00010"),
     ]
     for base_purl, expected_version in CHECKS:
         from urllib.parse import quote

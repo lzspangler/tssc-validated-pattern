@@ -1,0 +1,43 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:534787fe-ecd7-56df-9109-8b20ea8629f4",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-11-01T00:00:00Z",
+    "tools": [
+      {
+        "vendor": "Lightwell",
+        "name": "lightwell-remediation-catalog",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.springframework/spring-webmvc@5.3.18.rhlw-00010",
+      "group": "org.springframework",
+      "name": "spring-webmvc",
+      "version": "5.3.18.rhlw-00010",
+      "purl": "pkg:maven/org.springframework/spring-webmvc@5.3.18.rhlw-00010",
+      "properties": [
+        {
+          "name": "lightwell:tier",
+          "value": "remediated"
+        },
+        {
+          "name": "lightwell:baseVersion",
+          "value": "5.3.18"
+        },
+        {
+          "name": "lightwell:remediatedVersion",
+          "value": "5.3.18.rhlw-00010"
+        },
+        {
+          "name": "lightwell:osvId",
+          "value": "LW-DEMO-0025"
+        }
+      ]
+    }
+  },
+  "components": []
+}
