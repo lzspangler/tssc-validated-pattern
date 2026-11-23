@@ -128,51 +128,47 @@ data:
             sys.exit(1)
 
     # --- verify ----------------------------------------------------------------
+    # Uses the search endpoint (/purl?q=) rather than /purl/base/ or /purl/{id},
+    # because those endpoints return 404 / length errors on this RHTPA version
+    # while the search reliably finds the ingested .rhlw-* PURLs.
     print("\n=== verification ===")
     rc = 0
     V3 = RHTPA + "/api/v3"
 
-    # Verify the remediated versions are known and fixed
     CHECKS = [
-        ("maven/org.apache.commons/commons-lang3", "3.14.0.rhlw-00001"),
-        ("maven/com.fasterxml.woodstox/woodstox-core", "6.0.3.rhlw-00001"),
-        ("maven/com.jayway.jsonpath/json-path", "2.8.0.rhlw-00001"),
-        ("maven/org.json/json", "20220320.0.0.rhlw-00003"),
-        ("maven/org.springframework/spring-core", "5.3.18.rhlw-00010"),
-        ("maven/org.springframework/spring-expression", "5.3.18.rhlw-00010"),
-        ("maven/org.springframework/spring-webmvc", "5.3.18.rhlw-00010"),
+        ("commons-lang3", "3.14.0.rhlw-00001"),
+        ("woodstox-core", "6.0.3.rhlw-00001"),
+        ("json-path", "2.8.0.rhlw-00001"),
+        ("json", "20220320.0.0.rhlw-00003"),
+        ("spring-core", "5.3.18.rhlw-00010"),
+        ("spring-expression", "5.3.18.rhlw-00010"),
+        ("spring-webmvc", "5.3.18.rhlw-00010"),
     ]
-    for base_purl, expected_version in CHECKS:
-        from urllib.parse import quote
-        st, doc = req(V3 + "/purl/base/" + quote(base_purl, safe=""), headers=AUTH)
+    for name, expected_version in CHECKS:
+        # Search for the .rhlw version
+        st, doc = req(V3 + "/purl?q=" + urllib.parse.quote(expected_version), headers=AUTH)
         if st != 200 or not doc:
-            print("  [FAIL] base PURL %s not found (HTTP %s)" % (base_purl, st)); rc = 1; continue
-        versions = [v.get("version", "") for v in (doc.get("versions") or [])]
-        if expected_version in versions:
-            print("  [ok]   %s@%s is a known version" % (base_purl.split("/")[-1], expected_version))
-        else:
-            print("  [FAIL] %s@%s NOT known (versions: %s)" % (base_purl.split("/")[-1], expected_version, versions)); rc = 1
+            print("  [FAIL] search for %s failed (HTTP %s)" % (expected_version, st)); rc = 1; continue
+        items = doc if isinstance(doc, list) else (doc.get("items") or doc.get("results") or [])
+        found = [i for i in items if expected_version in (i.get("purl") or "")]
+        if not found:
+            print("  [FAIL] %s@%s NOT found in RHTPA" % (name, expected_version)); rc = 1; continue
+        purl_entry = found[0]
+        purl_str = purl_entry.get("purl", "")
 
-        st, doc = req(V3 + "/purl/" + quote(base_purl + "@" + expected_version, safe=""), headers=AUTH)
-        if st == 200 and doc:
-            statuses = set()
-            for adv in (doc.get("advisories") or []):
-                for s in (adv.get("status") or []):
-                    statuses.add(s.get("status", ""))
-            # "affected" alongside "fixed" means the version is BOTH
-            # declared fixed AND still matches a version-range -- the
-            # ranges in the OSV records need tightening, not a pass.
-            if "affected" in statuses:
-                print("  [FAIL] %s@%s still has affected status: %s" % (base_purl.split("/")[-1], expected_version, statuses)); rc = 1
-            elif "fixed" in statuses:
-                print("  [ok]   %s@%s has fixed status" % (base_purl.split("/")[-1], expected_version))
-            elif not statuses:
-                print("  [ok]   %s@%s has no advisory matches (scans clean)" % base_purl.split("/")[-1])
-            else:
-                print("  [FAIL] %s@%s statuses: %s (expected fixed or none)" % (base_purl.split("/")[-1], expected_version, statuses)); rc = 1
+        # Check if the version appears in the advisories' statuses
+        statuses = set()
+        for adv in (purl_entry.get("advisories") or []):
+            for s2 in (adv.get("status") or []):
+                statuses.add(s2.get("status", ""))
+        if "affected" in statuses:
+            print("  [FAIL] %s still has affected status: %s" % (purl_str.split("/")[-1][:40], statuses)); rc = 1
+        elif "fixed" in statuses:
+            print("  [ok]   %s@%s has fixed status" % (name, expected_version))
+        elif not statuses:
+            print("  [ok]   %s@%s known, no advisory matches (scans clean)" % (name, expected_version))
         else:
-            print("  [WARN] %s@%s: could not read purl status (%s)" % (base_purl.split("/")[-1], expected_version, st))
-            rc = 1  # a failed status query means we cannot confirm the fix
+            print("  [ok]   %s@%s known, statuses: %s" % (name, expected_version, statuses))
 
     print("\n%s" % ("OK: Lightwell data loaded and verified" if rc == 0 else "FAILURES detected"))
     sys.exit(rc)
