@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -117,16 +118,47 @@ class DeploymentSafetyTests(unittest.TestCase):
         self.instance.oc.assert_called_once()
         self.assertIn("rollout", self.instance.oc.call_args.args)
 
-    def test_verified_data_skips_upload_and_incomplete_data_is_loaded(self):
-        for verified in (True, False):
-            with self.subTest(verified=verified), patch.object(deploy, "run") as run:
-                if not verified:
-                    run.side_effect = [deploy.DeploymentError("data missing"), ""]
-                self.instance.load_remediation_data()
-                self.assertEqual(run.call_count, 1 if verified else 2)
-                self.assertEqual(run.call_args_list[0].args[0][-1], "--verify")
-                if not verified:
-                    self.assertNotIn("--verify", run.call_args.args[0])
+    def test_remediation_loader_reuses_verified_data_and_only_uploads_after_complete_check(self):
+        self.instance.ingress_ca_pem = "-----BEGIN CERTIFICATE-----\npublic-ca\n-----END CERTIFICATE-----\n"
+        self.instance.route_forward = (SimpleNamespace(poll=lambda: None), 63179, None)
+        self.instance.get = Mock(return_value={"data": {
+            "bombastic_api_url": base64.b64encode(
+                b"https://server-trusted-profile-analyzer.apps.example.test").decode(),
+            "oidc_issuer_url": base64.b64encode(
+                b"https://sso.apps.example.test/realms/backstage").decode()}})
+
+        cases = (("verified", 0, "", False),
+                 ("incomplete", 1, "Verification FAILED -- see [FAIL] lines above.", True),
+                 ("api-error", 6, "", False))
+        with patch.object(deploy.shutil, "which", return_value="/usr/bin/curl"):
+            for name, returncode, stdout, should_upload in cases:
+                with self.subTest(result=name), patch.object(deploy, "run") as load:
+                    def verify(command, *, text, capture_output, check, timeout, env):
+                        self.assertEqual(command[-1], "--verify")
+                        bin_dir = Path(env["PATH"].split(os.pathsep)[0])
+                        wrapper = (bin_dir / "curl").read_text()
+                        ca_bundle = Path(env["CURL_CA_BUNDLE"])
+                        self.assertTrue(ca_bundle.is_file())
+                        self.assertEqual(ca_bundle.read_text(), self.instance.ingress_ca_pem)
+                        self.assertIn("--cacert " + str(ca_bundle), wrapper)
+                        self.assertIn("--connect-to server-trusted-profile-analyzer.apps.example.test:443:127.0.0.1:63179", wrapper)
+                        self.assertIn("--connect-to sso.apps.example.test:443:127.0.0.1:63179", wrapper)
+                        self.assertIn("server-trusted-profile-analyzer.apps.example.test", env["NO_PROXY"])
+                        self.assertIn("sso.apps.example.test", env["NO_PROXY"])
+                        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+                    with patch.object(deploy.subprocess, "run", side_effect=verify) as check:
+                        if name == "api-error":
+                            with self.assertRaisesRegex(deploy.DeploymentError, "upload was not attempted"):
+                                self.instance.load_remediation_data()
+                        else:
+                            self.instance.load_remediation_data()
+                    check.assert_called_once()
+                    if should_upload:
+                        load.assert_called_once()
+                        self.assertNotIn("--verify", load.call_args.args[0])
+                    else:
+                        load.assert_not_called()
 
     def test_smoke_run_reuses_success_or_in_progress_and_retries_failure(self):
         for status in ("True", "Unknown", "False"):
