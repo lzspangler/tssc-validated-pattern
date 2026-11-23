@@ -3,10 +3,11 @@
 # -----------------------------------------------------------------------------
 # GitLab, plus the seeding job that:
 #   * creates the application and gitops repositories from files in THIS repo
-#   * mints the two project access tokens the pipelines push with
-#     (scm-auth-secret, scm-auth-gitops-secret)
-#   * mints the PaC token (gitlab-pac-token) Pipelines-as-Code uses to
-#     watch the application repo
+#   * mints the per-repository project access tokens the pipelines push
+#     with (scm-auth-secret, scm-auth-lightwell-secret,
+#     scm-auth-gitops-secret, scm-auth-lightwell-gitops-secret)
+#   * mints one PaC token per application repo
+#     (gitlab-pac-token-<repo>) Pipelines-as-Code uses to watch it
 #   * commits the .tekton/ PaC PipelineRuns into the application repo
 #   * creates the PaC Repository CR in the pipeline namespace
 #   * registers BOTH webhooks per application repository: the PaC webhook
@@ -42,6 +43,11 @@ spec:
           namespace: {{ .Values.pipelineNamespace | quote }}
         pac:
           enabled: true
+          # The issue-comment EventListener wiring (gitlab-webhook-secret
+          # + the Note Hook webhook) only exists when Tekton is installed:
+          # bootstrap derives it from the tekton component so the seeding
+          # job never waits on a Route that will never appear.
+          issueCommands: {{ .Values.components.tekton.enabled }}
         vault:
           kvMount: {{ .Values.vault.kvMount | quote }}
           pathPrefix: {{ .Values.vault.pathPrefix | quote }}

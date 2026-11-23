@@ -404,11 +404,16 @@ data:
         # ConfigMap rendered per cluster), because PaC only matches runs that
         # live in the repository it watches.
 
+        # One token Secret PER REPOSITORY: a GitLab project access token is
+        # scoped to exactly its own project (the project-bot user cannot be
+        # granted any other), so a shared Secret would let the second
+        # repository's Repository CR authenticate with the first one's
+        # token and fail to read its own repo.
         - name: Look for an existing PaC token
           kubernetes.core.k8s_info:
             api_version: v1
             kind: Secret
-            name: gitlab-pac-token
+            name: gitlab-pac-token-{{ $repo.name }}
             namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
           register: r_pac_secret
 
@@ -476,7 +481,7 @@ data:
               apiVersion: v1
               kind: Secret
               metadata:
-                name: gitlab-pac-token
+                name: gitlab-pac-token-{{ $repo.name }}
                 namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
                 labels:
                   app.kubernetes.io/part-of: tssc-validated-pattern
@@ -598,7 +603,7 @@ data:
                   type: gitlab
                   url: https://{{ $host }}
                   secret:
-                    name: gitlab-pac-token
+                    name: gitlab-pac-token-{{ $repo.name }}
                     key: token
                   webhook_secret:
                     name: gitlab-pac-webhook
@@ -629,7 +634,27 @@ data:
         # issue comment starting with a command. GitLab masks webhook tokens
         # on GET, so both hooks are looked up by URL and PUT unconditionally
         # to keep their token in step with the Secret.
+        #
+        # The EventListener half (gitlab-webhook-secret + the Note Hook
+        # pointing at the Route) is gated on pac.issueCommands, which
+        # bootstrap sets from components.tekton.enabled: without Tekton
+        # there is no tekton-triggers Application, the Route below never
+        # exists, and an ungated 30x10s wait would fail the whole play --
+        # skipping the PaC webhook, the SCM credentials, and every later
+        # repository's seeding. The PaC webhook itself stays ungated: it
+        # fires into the void at worst, it never blocks.
 
+        # Re-read: the earlier r_pac_webhook registration predates the
+        # "Store the PaC webhook secret" task, so on a first run it is empty.
+        - name: Read the PaC webhook secret back
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            name: gitlab-pac-webhook
+            namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
+          register: r_pac_webhook
+
+{{- if (($root.Values.pac | default dict).issueCommands | toString | ne "false") }}
         - name: Look for an existing EventListener webhook secret
           kubernetes.core.k8s_info:
             api_version: v1
@@ -664,16 +689,6 @@ data:
             namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
           register: r_el_webhook
 
-        # Re-read: the earlier r_pac_webhook registration predates the
-        # "Store the PaC webhook secret" task, so on a first run it is empty.
-        - name: Read the PaC webhook secret back
-          kubernetes.core.k8s_info:
-            api_version: v1
-            kind: Secret
-            name: gitlab-pac-webhook
-            namespace: '{{ "{{" }} pipeline_namespace {{ "}}" }}'
-          register: r_pac_webhook
-
         - name: Wait for the EventListener Route on {{ $repo.name }}
           kubernetes.core.k8s_info:
             api_version: route.openshift.io/v1
@@ -686,6 +701,7 @@ data:
           until:
             - r_el_route.resources | length > 0
             - r_el_route.resources[0].spec.host | default('') | length > 0
+{{- end }}
 
         - name: List webhooks on {{ $repo.name }}
           ansible.builtin.uri:
@@ -745,6 +761,7 @@ data:
             status_code:
               - 200
 
+{{- if (($root.Values.pac | default dict).issueCommands | toString | ne "false") }}
         - name: Create the issue-comment webhook on {{ $repo.name }}
           vars:
             el_url: '{{ "{{" }} "https://" ~ r_el_route.resources[0].spec.host {{ "}}" }}'
@@ -794,6 +811,7 @@ data:
             validate_certs: false
             status_code:
               - 200
+{{- end }}
 {{- end }}
 
 {{- if and $repo.accessToken ($repo.accessToken.enabled | default false) $pipelineNs }}

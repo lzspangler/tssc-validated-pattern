@@ -18,8 +18,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # The seeding Job creates the Pipelines-as-Code Repository CR for the
-  # application repository here (after minting gitlab-pac-token).
+  # The seeding Job creates the Pipelines-as-Code Repository CRs for the
+  # application repositories here (after minting their per-repo
+  # gitlab-pac-token-<repo> Secrets).
   - apiGroups: ["pipelinesascode.tekton.dev"]
     resources: ["repositories"]
     verbs: ["get", "list", "create", "update", "patch"]

@@ -86,7 +86,8 @@ CI triggering is split in two. Push, merge-request and MR-comment events go
 through **Pipelines as Code**: the GitLab seeding job commits `.tekton/`
 PipelineRuns (rendered per cluster from
 `components/gitlab/templates/cm-pac-pipelines.yaml`) into the application
-repository, mints a PaC project token (`gitlab-pac-token`), creates the
+repository, mints a PaC project token per application repo
+(`gitlab-pac-token-<repo>`), creates the
 PaC `Repository` CR, and registers the PaC webhook. Issue-comment slash
 commands (`/remediate`, `/generate-tests-*`) go through the
 **`agentic-issue-commands` EventListener**, because PaC never matches a
