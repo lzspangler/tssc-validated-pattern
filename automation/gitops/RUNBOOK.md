@@ -21,7 +21,7 @@ re-syncing rather than installing.
 | Artifactory | `https://artifactory-artifactory.<domain>` | `admin` / §1 password |
 | RHTPA | `https://server-trusted-profile-analyzer.<domain>` | OIDC via Keycloak |
 | RHTAS | — (Fulcio/Rekor/TUF Services, no UI) | — |
-| Orchestrator | Route in `automation-orchestrator-operator-system` | `admin` / `automationorchestrator-demo-initial-admin-password` Secret |
+| Orchestrator (optional) | Route in `automation-orchestrator-operator-system` | `admin` / `automationorchestrator-demo-initial-admin-password` Secret |
 | Tekton | namespace `tssc-app-ci` | — |
 | App environments | namespaces `spring-boot-example-{dev,qa,prod}` | — |
 
@@ -35,6 +35,70 @@ ingest of the CVE/OSV/CSAF feeds runs for several hours *after* that, in the
 background — you do not have to wait for it before §9.
 
 ## 0. Preflight
+
+The manual path below remains supported, with the existing charts, defaults,
+and GitLab issue/push triggers. The optional
+[cluster helpers](../../cluster/README.md) also provide an **opt-in full-deploy
+coordinator**, not a new default deployment path. Read its setup, source, and
+credential caveats before choosing it instead of repeating these manual steps.
+
+`ssc-demo-cluster.sh` still defaults to read-only `--preflight`, which requires
+an installed, Available GitOps instance; it is not the first operation on a
+cluster without GitOps. After a separate cluster login,
+`bash cluster/ssc-demo-cluster.sh --bootstrap-gitops` can install a missing
+GitOps Subscription using the existing global OperatorGroup, or reuse an
+existing Subscription without changing its channel/Argo CD instance. It waits
+for the operator and selected Argo CD instance and refuses ambiguous ownership.
+It does not grant admin rights or change memory. The separate, deliberate
+`bash cluster/ssc-demo-cluster.sh --prepare-gitops --allow-demo-cluster-admin`
+performs the demo controller grant and sets memory requests=`2Gi`, limits=`8Gi`,
+then waits for rollout (the manual equivalents are below). See the helper README
+for namespace/name/channel overrides and the per-stage timeout (default `15m`).
+
+For the coordinator, use **Python 3.10+ in an isolated venv** with dependencies
+from `cluster/requirements.txt`. Create a durable mode-`700` parent outside the
+repository, then initialize once with `--init-values --values <private-path>
+--repo-url <credential-free-HTTPS-remote> --revision <remote-branch-or-tag>
+--domain apps.<cluster-domain>`. This creates a mode-`600` file without overwrite,
+containing the six §4 credentials plus five `deployment.artifactory` credentials.
+Do not independently regenerate credentials when switching deployment paths;
+recover the original manual Artifactory and platform values into that file.
+
+`--plan --values <private-path>` is local-only (also the default mode), uses
+`--source-dir` defaulting to the script's repository root, and invokes Helm but
+no `oc` or network. `--apply --values <private-path>
+--allow-demo-cluster-admin` always fetches the configured remote branch/tag and
+validates it before any cluster mutation, regardless of `--source-dir`. It then
+bootstraps/prepares GitOps, deploys standalone Artifactory and the bootstrap
+Applications, initializes runtime Secrets, gates platform readiness, and runs
+the existing remediation data loader. It reads the source AI ConfigMap and
+requires the matching `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` environment variable or
+existing `ai-agent-secret`, without overriding the chosen provider. Secrets and
+Application specs that differ from the private inputs fail for explicit repair,
+not credential rotation. Credential-bearing subprocess output is withheld;
+never log private values or API keys. `--timeout` defaults to `3600` seconds per
+readiness stage, not a total deployment deadline.
+
+The coordinator disables Orchestrator unless private values explicitly set
+`components.orchestrator.enabled: true`. To opt in, the selected source must
+contain `orchestration/remediate_and_promote_gitlab.json` and
+`orchestration/remediate_next_gitlab.json`; plan/apply fail if either is absent.
+The manual full-demo path retains the chart's enabled default. Local plan success
+does not verify the remote source used by apply.
+
+The coordinator creates all bootstrap Applications before their readiness gates
+because Jobs depend on other Applications; annotations alone do not serialize
+separately applied Applications (see §5). `--skip-data` logs an explicit skip of
+data loading **and verification**, leaving data unverified. Otherwise reruns use
+the existing loader and can create new import versions, not a literal no-op.
+Adding `--smoke-test` to apply opts into the §11 build/image/SBOM/CVE-issue PipelineRun;
+it is not automatic. App environments are reported as awaiting first image
+tags/promotions, not falsely Healthy. Coordinator HTTPS calls retain TLS
+verification and fail on trust issues; configure trust and RHTPA/OIDC
+reachability rather than assuming chart health proves API access. Existing
+charts and their TLS behavior are unchanged. Full examples and local validation
+with the venv's `python -B -m unittest discover -s cluster/tests -v` (focused safety checks)
+are in the helper README.
 
 ```sh
 oc whoami                                      # must be cluster-admin
@@ -98,8 +162,8 @@ cluster that has never had ODF — you have three options:
    your §4 overrides, with `storageClassName` pointing at a *block* class
    (`gp3-csi` on AWS, `thin-csi` on vSphere) and `channel` matching the
    cluster's OpenShift minor. See `components/odf/README.md`. Budget an extra
-   15–25 minutes, and read the note in `bootstrap-infra/values.yaml` about what
-   that does to the wave ordering before you decide where to put it.
+   15–25 minutes. ODF must become ready before its consumers can succeed;
+   Application wave annotations alone do not enforce that dependency (§5).
 2. **Install ODF separately**, ahead of §5 — the same chart, staged by hand.
    `components/odf/README.md` has the commands.
 3. **Go without it**: read *Storage* in `README.md` for RHTPA's filesystem
@@ -109,6 +173,10 @@ cluster that has never had ODF — you have three options:
 On a cluster that already has ODF — most Red Hat workshop clusters, including
 the reference cluster — leave `components.odf.enabled` at its default `false`.
 A second StorageCluster is not something you back out of cleanly.
+The coordinator reuses healthy existing ODF (without adopting a second install)
+and never mutates the default StorageClass. If absent and required, ODF must be
+explicitly enabled with a channel matching the cluster minor and an appropriate
+existing block class; there is no automatic storage fallback.
 
 **Check whether the cluster already has a Keycloak, before anything else.**
 
@@ -262,10 +330,20 @@ for all of it.
 
 ## 4. Write an uncommitted overrides file
 
-Six credentials have no default and must not reach git.
+Six credentials have no default and must not reach git. Use a durable private
+directory **outside the checkout**, not `/tmp`. This is the manual-path recipe;
+if the coordinator already initialized this file, reuse it and do not regenerate.
 
 ```sh
-cat > /tmp/ssc-demo-values.yaml <<EOF
+export SSC_VALUES_DIR="$HOME/.config/ssc-demo"
+export SSC_VALUES="$SSC_VALUES_DIR/values.yaml"
+(
+set -eu
+umask 077
+mkdir -p "$SSC_VALUES_DIR"
+chmod 700 "$SSC_VALUES_DIR"
+set -C # refuse to overwrite an existing file (including a symlink)
+cat > "$SSC_VALUES" <<EOF
 deployer:
   domain: ${DOMAIN}
 credentials:
@@ -276,7 +354,8 @@ credentials:
   tpaCliClientSecret: $(openssl rand -hex 16)
   quayAdminPassword: $(openssl rand -hex 16)
 EOF
-chmod 600 /tmp/ssc-demo-values.yaml
+)
+# If creation failed because the file exists, STOP and reuse/recover it.
 ```
 
 Add your fork from §2 if you made one:
@@ -297,14 +376,18 @@ components:
     storageClassName: gp3-csi # a BLOCK class, not the demo's general-purpose one
 ```
 
-**Keep this file.** `tpaCliClientSecret` is needed again in §8, and the other
-three are the only copies of the GitLab, Quay and database passwords.
+**Keep this mode-600 file and its mode-700 parent.** `tpaCliClientSecret` is
+needed again in §8; the file preserves all six platform credentials for every
+re-render. Keep the separate Artifactory credentials from §1 equally durable.
+The manual recipe does not replace §1 or create `deployment.artifactory`; the
+coordinator requires its five Artifactory values to match the existing Secrets
+exactly. Never independently regenerate either set mid-install or commit them.
 
 ## 5. Create the Applications
 
 ```sh
 helm template ssc automation/gitops/bootstrap-infra \
-  -f /tmp/ssc-demo-values.yaml | oc apply -f -
+  -f "$SSC_VALUES" | oc apply -f -
 ```
 
 **Pushing chart changes does NOT update the cluster.** No Argo Application
@@ -313,16 +396,15 @@ Applications, and it is only ever read at this `helm template` step. So after
 changing anything under `automation/gitops/bootstrap-infra/`, re-run the §5
 command to converge the cluster. `oc apply` makes it idempotent and adopts
 existing objects (e.g. a hand-made `spring-boot-example-dev`) in place; keep
-the private override from §4 somewhere DURABLE — `/tmp` is wiped on reboot
-(and macOS purges files unused for ~3 days), which silently deletes the only
-copy of the credentials. Keep it outside the repo (e.g. `~/.config/ssc-demo/`,
-`chmod 600`) so it cannot be committed by accident; it is needed for every
-re-render, not just the first. To apply only a slice of the chart, render with
+the private override at the durable external `"$SSC_VALUES"` path from §4;
+restore that variable in a new shell before using these commands. It is needed
+for every re-render, not just the first. To apply only a slice of the chart, render with
 the full values and filter the output (e.g. just the `spring-boot-example-*`
 Applications) before piping to `oc apply` — useful when the override file is
 gone but only Applications that carry no credentials need updating.
 
-Fifteen Applications land at once; the sync waves serialise them.
+With the normal enabled components, fifteen bootstrap Applications land at once
+(sixteen with ODF), separate from Artifactory. The chart annotates these waves:
 
 ```
  0  pipelines            OpenShift Pipelines operator
@@ -336,10 +418,17 @@ Fifteen Applications land at once; the sync waves serialise them.
 16  spring-boot-example-{dev,qa,prod}
 ```
 
-Fifteen, or sixteen with ODF.
-
-A wave does not start until the previous one is Healthy, so one Application
-stuck in `Progressing` blocks everything behind it.
+These are **not a cross-Application readiness scheduler** when the rendered
+Applications are separately applied as above. Argo CD sync waves order resources
+within a sync operation; the annotations do not make independently reconciling
+Applications wait for earlier Applications to become Healthy. Components can
+start concurrently, with CRD retries and Jobs implementing actual waits. Create
+all bootstrap Applications before readiness gates, as the coordinator does:
+for example, the Pipelines cluster-defaults Job waits on the Tekton layer, and
+other setup Jobs depend on GitLab, Keycloak, or storage. Waiting on each
+Application immediately after creating it can deadlock those dependencies.
+Inspect individual health/Job status rather than assuming annotation order is
+an enforced dependency chain. Explicit component disables change the count.
 
 ## 6. Watch it converge
 
@@ -350,7 +439,7 @@ watch "oc -n openshift-gitops get applications -l app.kubernetes.io/part-of=ssc-
 
 Expected behaviour while you wait:
 
-* **The Tekton Applications fail their first sync or two.** Wave 3 is reached
+* **The Tekton Applications fail their first sync or two.** They can reconcile
   before the operator has finished installing its CRDs. The 30-attempt retry and
   `SkipDryRunOnMissingResource` exist for exactly this; leave them alone.
 * **GitLab sits in `Progressing` for 10–20 minutes.** The seeding job is doing a
@@ -368,8 +457,9 @@ Expected behaviour while you wait:
   (ImagePullBackOff) on a fresh cluster.** Each one's health includes the
   Deployment pulling its image, and the imported values files' initial tags do
   not exist in Quay yet — they appear with the first `ci-build-publish` run
-  and its dev promotion. That is the demo working as designed, and wave 16 is
-  last on purpose so it blocks nothing behind it.
+  and its dev promotion. QA and prod await their corresponding promotions.
+  These environments are not yet verified Healthy; the coordinator reports
+  them separately rather than including them in platform readiness gates.
 
 If many Applications are stuck at once — each `Running` with a
 `waiting for healthy state of ...` message that never resolves — suspect the
@@ -495,6 +585,15 @@ It loads the one-component CycloneDX catalogs (which make
 and the OSV records that declare them `fixed`. `--verify` exits non-zero on any
 `[FAIL]`.
 
+The coordinator reuses this same loader when RHTPA is enabled. Re-uploading a
+document can create another import version; the newest `modified` wins, so
+the coordinator verifies the existing dataset first and skips uploads when it
+passes. Incomplete data triggers another load; already uploaded documents may
+gain another import version. `--skip-data` explicitly logs that loading and
+verification were skipped, not that data is ready. The coordinator does not
+request `--insecure`; TLS trust failures or unreachable RHTPA/OIDC endpoints
+fail the stage even if Argo reports the platform Healthy.
+
 The script authenticates by reading `tpa-secret` out of `tssc-app-ci`, so §8a
 has to be done first. RHTPA must be Healthy; its feed importers do **not** have
 to have finished.
@@ -540,6 +639,10 @@ two project webhooks: one pointing at
 
 ## 11. Smoke test
 
+This is an explicit optional action, not an automatic part of coordinator
+apply; the coordinator's `--smoke-test` opts into the equivalent PipelineRun.
+Coordinator reruns reuse a matching successful/in-progress smoke run and create
+a new attempt only if the previous run failed or the source/run inputs changed.
 Build and scan, which is what produces the CVE issues the rest of the demo
 reacts to. The `workspace` workspace is a per-run PVC, so give `tkn` a claim
 template:
@@ -561,9 +664,16 @@ tkn -n $NS pipeline start agentic-cve-analysis \
   -p git-host=gitlab-gitlab.${DOMAIN} \
   -w name=workspace,volumeClaimTemplateFile=/tmp/ws.yaml \
   -w name=maven-settings,secret=maven-settings \
-  -w name=git-auth,secret=scm-auth-secret \
   --showlog
 ```
+
+The public demo clones without a `git-auth` binding, matching its GitLab issue
+triggers. **Do not bind `scm-auth-secret` as clone credentials:** its
+`username`/`token` SCM API shape does not match `git-clone`'s basic-auth workspace.
+For a private repository, create a separate compatible clone Secret and add
+`-w name=git-auth,secret=<clone-secret>`: the task accepts `username`/`password`
+files or the `.git-credentials` plus `.gitconfig` pair. Keep the SCM API Secret
+separate; never embed tokens in the repository URL or logs.
 
 Success looks like: the image appears at `quay.${DOMAIN}/tssc/…` (the `tssc`
 repository is created on first push by the robot's `creator` team role), the
@@ -621,17 +731,27 @@ healthy.
 
 ## Tearing it down
 
-```sh
-helm template ssc automation/gitops/bootstrap-infra \
-  -f /tmp/ssc-demo-values.yaml | oc delete -f - --ignore-not-found
-oc delete -f automation/gitops/artifactory/application-artifactory.yaml --ignore-not-found
-oc delete ns gitlab keycloak quay-registry trusted-artifact-signer \
-             trusted-profile-analyzer artifactory tssc-app-ci \
-             automation-orchestrator-operator-system \
-             spring-boot-example-dev spring-boot-example-qa spring-boot-example-prod \
-             --ignore-not-found
+First inspect the read-only cleanup inventory from the cluster helpers:
+
+```bash
+"$SSC_PYTHON" -B cluster/ssc-demo-deploy.py --cleanup-plan --values "$SSC_VALUES"
 ```
 
-Deleting the Applications leaves the operator Subscriptions in
-`openshift-operators` and the ODF BackingStore patch in place; both are
-harmless and both are reapplied by a reinstall.
+Use the dependency-equipped Python environment described in
+[`cluster/README.md`](../../cluster/README.md#cleanup-inventory). The command
+checks cluster identity against the configured apps domain, reads current
+resource metadata, and changes nothing. It has no deletion option.
+
+Do not delete all rendered Applications or a fixed list of namespaces to reset a
+shared cluster. Bootstrap Applications have Argo cascading-delete finalizers:
+removing an Application can delete adopted resources, including operator
+Subscriptions. Namespace/PVC/bucket deletion can destroy backing data, while
+cluster-scoped RBAC, shared configuration patches, and external service data
+can remain behind. Deleting a standalone Artifactory Application does not by
+itself remove its workloads.
+
+The inventory marks GitOps, ODF, operators, Keycloak and Orchestrator as protected.
+Other entries require ownership and data-retention review, not blind deletion.
+A fresh-reset executor is not yet implemented; it needs explicit ownership and
+data-deletion boundaries. Preserve private values and never force-remove storage
+or namespace finalizers to make a reset finish.

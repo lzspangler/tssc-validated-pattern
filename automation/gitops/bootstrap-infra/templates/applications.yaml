@@ -533,6 +533,7 @@ spec:
           password: {{ .Values.credentials.tpaDbPassword | quote }}
         oidc:
           issuerUrl: {{ $issuer | quote }}
+          caConfigMap: {{ .Values.components.rhtpaPrerequisites.caConfigMap | quote }}
           tpaCli:
             secret: {{ .Values.credentials.tpaCliClientSecret | quote }}
   destination:
@@ -699,4 +700,3 @@ spec:
   {{- include "root-app.syncPolicy" $ | nindent 2 }}
 {{- end }}
 {{- end }}
-

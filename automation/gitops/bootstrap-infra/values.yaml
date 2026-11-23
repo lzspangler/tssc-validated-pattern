@@ -30,13 +30,8 @@
 #   10  rhtpa-prerequisites      Postgres + oidc-tpa-cli Secret + the S3 bucket. Its PreSync
 #                                hook blocks on the Keycloak issuer, which is the real
 #                                reason keycloak is a lower wave.
-#   10  orchestrator             Red Hat Automation Orchestrator + the two remediation
-#                                workflows. Wave 10, parallel with quay/rhtas: it needs
-#                                GitLab seeded (wave 8 -- the setup Job reads
-#                                scm-auth-secret and resolves the app project id) but is
-#                                independent of the wave-10 components. Its Application
-#                                includes the setup Job, so it stays Progressing for the
-#                                10-15 min the platform takes to boot.
+#   10  orchestrator             Red Hat Automation Orchestrator + its remediation
+#                                workflows; requires workflow definitions in source.
 #   15  rhtpa-operator           The analyzer itself, via the RHTPA operator
 #                                (TrustedProfileAnalyzer, rhtpa.io/v1). The
 #                                charts.openshift.io Helm path was removed: only
@@ -291,6 +286,7 @@ components:
     enabled: true
     namespace: trusted-profile-analyzer
     syncWave: "10"
+    caConfigMap: ssc-router-ca
 
   # RHTPA 3.x via the operator. MUTUALLY EXCLUSIVE with `rhtpa` below -- both
   # publish the same Route and own the same Deployments, so bootstrap-infra
@@ -323,6 +319,13 @@ components:
     enabled: true
     namespace: trusted-profile-analyzer
     syncWave: "15"
+    # The coordinator keeps the upstream 1-CPU requests when they fit on
+    # schedulable workers. It uses the fallback only when existing CPU requests
+    # leave insufficient room for both RHTPA workloads.
+    scheduling:
+      preferredCpuRequest: "1"
+      fallbackCpuRequest: "100m"
+    serverCaConfigMap: ssc-router-ca
     # stable-v3 is RHTPA 3.x, the first line Exploit Intelligence supports.
     channel: stable-v3
     # Set false if the namespace already has an OperatorGroup -- two in one
@@ -342,18 +345,8 @@ components:
       # `https://s3-openshift-storage.<domain>:443`.
       regionEndpoint: ""
 
-  # Red Hat Automation Orchestrator: the platform the orchestration/
-  # workflows (Remediate Test Promote Gitlab, Remediate Next Gitlab) run on.
-  # Installs the operator, its BYO Postgres and the AutomationOrchestrator
-  # CR, then runs a setup Job that patches the worker Deployment and imports
-  # + publishes the two workflow JSONs with this cluster's GitLab host and
-  # project id rewritten in. See components/orchestrator/README.md.
-  #
-  # Wave 10, parallel with quay/rhtas/rhtpa-prerequisites: it needs GitLab
-  # seeded (wave 8) for the setup Job's project-id lookup and scm-auth-secret
-  # read, but nothing at wave 10 needs IT. The rhtpa-operator wave below
-  # waits for this Application to be Healthy, which includes the setup Job --
-  # expect the whole install to gain the platform's 10-15 min boot here.
+  # Available to the manual full-demo path. The deployment coordinator disables
+  # it unless private values explicitly opt in with a workflow-bearing source.
   orchestrator:
     enabled: true
     namespace: automation-orchestrator-operator-system
@@ -404,4 +397,3 @@ components:
       - name: prod
         namespace: spring-boot-example-prod
         valuesFile: environments/prod/values.yaml
-

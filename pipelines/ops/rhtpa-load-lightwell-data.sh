@@ -110,7 +110,7 @@ TOKEN=$(curl -s $INSECURE --max-time 30 -u "$CLIENT_ID:$CLIENT_SECRET" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])') \
   || die "could not mint an OIDC token for client $CLIENT_ID"
 
-API=(curl -s $INSECURE --max-time 180 -H "authorization: Bearer $TOKEN")
+API=(curl -s ${INSECURE:+"$INSECURE"} --max-time 180 -H "authorization: Bearer $TOKEN")
 
 echo "RHTPA:     $RHTPA"
 echo "data:      $DATA_DIR"
@@ -257,7 +257,7 @@ except Exception:
   #    is there an explicit fixed / not_affected status to suppress it? Any CVE
   #    left with only `affected` is one the pipeline scan will still report.
   "${API[@]}" "$V3/purl/$(urlenc "$remediated")" > /tmp/lw-purl.json || true
-  python3 - /tmp/lw-purl.json <<'PY' || RC=1
+  python3 - /tmp/lw-purl.json "$remediated" "$DATA_DIR"/osv/*.json <<'PY' || RC=1
 import collections, json, sys
 
 try:
@@ -266,14 +266,28 @@ except Exception:
     sys.exit("  [FAIL] could not read purl status")
 
 by_cve = collections.defaultdict(lambda: collections.defaultdict(list))
+cleared = set()
 for adv in doc.get("advisories") or []:
     for st in adv.get("status") or []:
         cve = st["vulnerability"]["identifier"]
         by_cve[cve][st.get("status")].append(adv.get("document_id"))
+        if st.get("status") in ("fixed", "not_affected"):
+            cleared.add((adv.get("document_id"), cve))
 
-if not by_cve:
-    print("  [ok]   no advisory matches this PURL at all")
-    raise SystemExit(0)
+# An empty/partially seeded database must not pass the verify-before-load check.
+expected = set()
+base, version = sys.argv[2].rsplit("@", 1)
+for filename in sys.argv[3:]:
+    with open(filename) as stream:
+        advisory = json.load(stream)
+    if any(affected.get("package", {}).get("purl", "").rsplit("@", 1)[0] == base
+           and any(event.get("fixed") == version for span in affected.get("ranges", [])
+                   for event in span.get("events", [])) for affected in advisory.get("affected", [])):
+        expected.update((advisory["id"], alias) for alias in advisory.get("aliases", []))
+missing = expected - cleared
+if not expected or missing:
+    print("  [FAIL] expected Lightwell fixed statuses are missing:", sorted(missing))
+    raise SystemExit(1)
 
 unsuppressed = []
 for cve in sorted(by_cve):
