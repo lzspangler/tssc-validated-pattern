@@ -41,6 +41,11 @@ spec:
           # a whole sibling directory instead; no subPath needed.
           - mountPath: /populate-scripts
             name: populate-script-vol
+          {{- if .Values.tls.caConfigMap }}
+          - mountPath: /etc/ssc-ca
+            name: ssc-ingress-ca
+            readOnly: true
+          {{- end }}
       restartPolicy: Never
       serviceAccount: gitlab
       volumes:
@@ -51,3 +56,11 @@ spec:
         configMap:
           name: populate-repo-script
           defaultMode: 0755
+      {{- if .Values.tls.caConfigMap }}
+      - name: ssc-ingress-ca
+        configMap:
+          name: {{ .Values.tls.caConfigMap | quote }}
+          items:
+            - key: ca-bundle.crt
+              path: ca-bundle.crt
+      {{- end }}
