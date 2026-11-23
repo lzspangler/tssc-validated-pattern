@@ -32,15 +32,20 @@
 # dies with "invalid map key" -- one bad file aborts the whole event, so no
 # PipelineRun from ANY .tekton file in the repo.
 #
-# Three runs per repository:
+# Two runs per repository:
 #   .tekton/push-ci.yaml               push to the default branch ->
 #                                      ci-build-publish (build + image +
 #                                      SBOM + dev promotion)
-#   .tekton/pull-request-verify.yaml   MRs -> git-clone + mvn verify, with
-#                                      PaC reporting the status back to the MR
 #   .tekton/generate-tests-comment.yaml /generate-tests-unit comment on an MR
 #                                      -> agentic-test-generation-unit
 #                                      (TECH PREVIEW: on-comment matching)
+#
+# There is deliberately NO MR-opened verification run: opening an MR runs
+# nothing (merge-gating is off on the projects), so a remediation MR can be
+# opened and merged without waiting for a verify pipeline. If you want MR
+# verification back, re-add a pull_request-event definition -- and note the
+# seeding job then also needs it listed here to keep it from being pruned
+# (see the "Remove stale .tekton files" task in the playbook).
 #
 # The ISSUE-comment slash commands (/remediate, /generate-tests-* on
 # issues) are NOT PaC-triggered -- PaC never matches issue comments. They
@@ -99,78 +104,6 @@ data:
           value: "{{ $quay }}/tssc/{{ $repo.name }}:{{ "{{" }} revision {{ "}}" }}"
       workspaces:
         - name: workspace
-          volumeClaimTemplate:
-            spec:
-              accessModes: [ReadWriteOnce]
-              resources:
-                requests:
-                  storage: 5Gi
-        - name: maven-settings
-          secret:
-            secretName: maven-settings
-        - name: git-auth
-          secret:
-            secretName: {{ $scm }}
-  pull-request-verify.yaml--{{ $repo.name }}: |
-    ---
-    # MR verification: clone the MR head and run the test suite. PaC reports
-    # the outcome back to the merge request as a commit status; combined with
-    # only_allow_merge_if_pipeline_succeeds on the project, a red run blocks
-    # the merge.
-    apiVersion: tekton.dev/v1
-    kind: PipelineRun
-    metadata:
-      # generateName for the same reason as push-ci.yaml above: every MR
-      # event needs its own uniquely-named run.
-      generateName: pull-request-verify-
-      annotations:
-        pipelinesascode.tekton.dev/on-event: "[pull_request]"
-        pipelinesascode.tekton.dev/on-target-branch: "[{{ $branch }}]"
-        pipelinesascode.tekton.dev/max-keep-runs: "3"
-    spec:
-      params:
-        - name: repo-url
-          value: "{{ "{{" }} repo_url {{ "}}" }}"
-        - name: revision
-          value: "{{ "{{" }} revision {{ "}}" }}"
-      pipelineSpec:
-        params:
-          - name: repo-url
-          - name: revision
-        workspaces:
-          - name: source
-          - name: maven-settings
-        tasks:
-          - name: fetch-source
-            taskRef:
-              name: git-clone
-            params:
-              - name: url
-                value: $(params.repo-url)
-              - name: revision
-                value: $(params.revision)
-              - name: subdirectory
-                value: source
-            workspaces:
-              - name: output
-                workspace: source
-              - name: basic-auth
-                workspace: git-auth
-          - name: run-tests
-            taskRef:
-              name: maven
-            params:
-              - name: GOALS
-                value: ["verify"]
-              - name: SUBDIRECTORY
-                value: source
-            workspaces:
-              - name: source
-                workspace: source
-              - name: maven_settings
-                workspace: maven-settings
-      workspaces:
-        - name: source
           volumeClaimTemplate:
             spec:
               accessModes: [ReadWriteOnce]

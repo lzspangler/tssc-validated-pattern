@@ -607,6 +607,43 @@ data:
             item.status == 200
             and (item.json.content | b64decode) != item.item.value
 
+        # Remove .tekton files that are no longer defined: the create and
+        # update tasks above only ever ADD definitions, so a file dropped
+        # from the ConfigMap (e.g. pull-request-verify.yaml, removed to stop
+        # MR-opened verification runs) would otherwise keep matching events
+        # forever. Anything committed under .tekton/ that is not in this
+        # repository's ConfigMap keys gets deleted.
+        - name: List committed .tekton files on {{ $repo.name }}
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/tree?path=.tekton&ref={{ $branch }}
+            method: GET
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
+              - 404
+          register: r_tekton_tree
+
+        - name: Remove stale .tekton files from {{ $repo.name }}
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/{{ "{{" }} (('.tekton/' ~ item) | urlencode | regex_replace('/', '%2F')) {{ "}}" }}?branch={{ $branch }}&commit_message=Remove%20stale%20Pipelines-as-Code%20definition
+            method: DELETE
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 204
+              - 404
+          loop: >-
+            {{ "{{" }} ((r_tekton_tree.json | default([]) | selectattr('path', 'defined'))
+              | map(attribute='path') | map('regex_replace', '^\.tekton/', '') | list
+              | difference(r_pac_configmap.resources[0].data | dict2items
+                  | selectattr('key', 'search', '--{{ $repo.name }}$')
+                  | map(attribute='key') | map('regex_replace', '--{{ $repo.name }}$', '') | list)) {{ "}}" }}
+          # 404 is tolerated: the tree listing can lag the deletes in this
+          # very loop, each of which is its own commit.
+
         - name: Create the Pipelines-as-Code Repository CR for {{ $repo.name }}
           kubernetes.core.k8s:
             state: present
