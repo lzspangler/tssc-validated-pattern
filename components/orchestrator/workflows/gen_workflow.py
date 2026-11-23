@@ -179,28 +179,83 @@ while True:
 
 finished_at = (remediation.get("status", {}).get("completionTime")
                or created(remediation))
-print("Remediation %s succeeded; waiting for the merge-triggered ci-build-publish..."
+print("Remediation %s succeeded; resolving the remediation MR..."
       % remediation["metadata"]["name"], file=sys.stderr)
 
 # ---------------------------------------------------------------------------
-# Stage 2: merging the remediation MR fires the ci-build-push EventListener,
-# which starts ci-build-publish. The first ci-build-publish run that succeeds
-# AFTER the remediation finished is taken as "the PR merged and CI published a
-# new image" (correlating a build to THIS issue would need the GitLab API from
-# an authenticated node -- fine while one issue is in flight, which is how the
-# demo runs; documented in the README).
+# Stage 2: the remediation pipeline opened a merge request
+# (REMEDIATION_PR_URL). A HUMAN reviews and merges THAT MR; the merge fires
+# the PaC push event, which starts ci-build-publish for the merge commit.
+# Wait for the MR itself to reach state "merged", then for the build of
+# exactly that merge commit. The old logic took the first successful build
+# created anywhere after the remediation finished -- which matches the
+# constant background of unrelated ci-build-publish runs (.tekton updates,
+# other merges) and sailed through without waiting for the merge at all.
 # ---------------------------------------------------------------------------
+MR_TIMEOUT_MIN = 240
+pr_url = result(remediation, "REMEDIATION_PR_URL")
+if not pr_url:
+    sys.exit("Remediation %s succeeded but emitted no REMEDIATION_PR_URL "
+             "(was SELECTED=0, nothing to remediate?) -- nothing to wait for."
+             % remediation["metadata"]["name"])
+
+# https://<host>/<group>/<project>/-/merge_requests/<iid>
+_rest = pr_url.split("/", 3)
+gl_host, mr_rest = _rest[2], _rest[3]
+project_path, _, mr_iid = mr_rest.partition("/-/merge_requests/")
+print("Remediation opened %s; waiting for a human to merge it..." % pr_url,
+      file=sys.stderr)
+
+# GitLab API access: the app repository's project token, read from
+# scm-auth-secret in the pipeline namespace (the worker RBAC grants exactly
+# that one Secret). TLS verification is off for these calls: the GitLab
+# Route serves the cluster ingress certificate, which the in-cluster CA
+# bundle does not validate.
+import base64
+_sec = api("GET", "/api/v1/namespaces/%s/secrets/scm-auth-secret" % NAMESPACE)
+gl_token = base64.b64decode(_sec.get("data", {}).get("token", "")).decode()
+_noverify = ssl.create_default_context()
+_noverify.check_hostname = False
+_noverify.verify_mode = ssl.CERT_NONE
+
+def gitlab(path):
+    req = urllib.request.Request("https://%s/api/v4%s" % (gl_host, path))
+    req.add_header("PRIVATE-TOKEN", gl_token)
+    with urllib.request.urlopen(req, context=_noverify, timeout=60) as resp:
+        return json.loads(resp.read().decode() or "{}")
+
+mr = None
+deadline = time.time() + MR_TIMEOUT_MIN * 60
+while True:
+    mr = gitlab("/projects/%s/merge_requests/%s"
+                % (urllib.parse.quote(project_path, safe=""), mr_iid))
+    if mr.get("state") == "merged":
+        break
+    if mr.get("state") == "closed":
+        sys.exit("Remediation MR %s was closed without merging -- "
+                 "nothing will be tested or promoted." % pr_url)
+    print("  MR state: %s; waiting for the merge..." % mr.get("state"),
+          file=sys.stderr)
+    if time.time() > deadline:
+        sys.exit("Timed out after %d min waiting for remediation MR %s "
+                 "to be merged" % (MR_TIMEOUT_MIN, pr_url))
+    time.sleep(POLL_SECONDS)
+
+merge_sha = mr.get("merge_commit_sha") or mr.get("sha")
+print("MR merged as %s; waiting for its ci-build-publish run..." % merge_sha,
+      file=sys.stderr)
+
 build = None
 deadline = time.time() + BUILD_TIMEOUT_MIN * 60
 while True:
     candidates = [r for r in list_runs("ci-build-publish")
-                  if created(r) > finished_at and state(r) == "True"]
+                  if param(r, "revision") == merge_sha and state(r) == "True"]
     if candidates:
         build = max(candidates, key=created)
         break
     if time.time() > deadline:
         sys.exit("Timed out after %d min waiting for a successful ci-build-publish "
-                 "run after %s (was the remediation MR merged?)" % (BUILD_TIMEOUT_MIN, finished_at))
+                 "run for merge commit %s" % (BUILD_TIMEOUT_MIN, merge_sha))
     print("  waiting for the merge-triggered build...", file=sys.stderr)
     time.sleep(POLL_SECONDS)
 
