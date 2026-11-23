@@ -33,7 +33,7 @@
 # or permission data for the commenting user (just id/name/username), and
 # cel cannot call the GitLab API -- so the only enforceable check here is
 # a username allowlist. Every filter below requires
-#   body.user.username in ['root']
+#   body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline']
 # (fail closed: an unknown commenter is rejected, not silently run). If
 # you seed demo users (gitlab.users in the gitlab component), ADD THEM to
 # all four filters -- a missing username is indistinguishable from an
@@ -622,7 +622,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root'] &&
+                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
                 body.object_attributes.note.startsWith('/remediate')
             - name: overlays
               value:
@@ -733,7 +733,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root'] &&
+                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
                 body.object_attributes.note.startsWith('/generate-tests-unit')
             - name: overlays
               value:
@@ -783,7 +783,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root'] &&
+                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
                 body.object_attributes.note.startsWith('/generate-tests-functional')
             - name: overlays
               value:
@@ -833,7 +833,7 @@ spec:
               value: >-
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
-                body.user.username in ['root'] &&
+                body.user.username in ['root', 'ssc-demo-pipeline', 'lightwell-demo-pipeline'] &&
                 body.object_attributes.note.startsWith('/generate-tests-integration')
             - name: overlays
               value:
