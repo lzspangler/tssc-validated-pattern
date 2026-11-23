@@ -176,19 +176,22 @@ confirm `development/spring-boot-example-application` exists with the CVE
 labels, a `.tekton/` directory, and **webhooks created by PaC** (push +
 merge request events, pointing at the Pipelines-as-Code route).
 
-## 5. Load the Lightwell remediation data into RHTPA
+## 5. Verify the Lightwell remediation data in RHTPA
 
 Without this the demo still runs, but there is no backport for the AI to
 recommend:
 
+The `components/ops` component runs the `rhtpa-load-lightwell-data` Job
+automatically at wave 16 (after RHTPA is healthy). Check its output:
+
 ```sh
-pipelines/ops/rhtpa-load-lightwell-data.sh            # load, then verify
-pipelines/ops/rhtpa-load-lightwell-data.sh --verify   # verify only
+oc -n tssc-app-ci logs job/rhtpa-load-lightwell-data
+# ...should end "OK: Lightwell data loaded and verified"
 ```
 
-It authenticates by reading `tpa-secret` from `tssc-app-ci` (Vault-backed
-since wave 0). RHTPA must be Healthy; its feed importers do not have to have
-finished.
+The Job authenticates via the Vault-backed `ops-tpa-credentials` Secret and
+runs the same load + verify logic the manual script used. If it fails, its
+log names the specific OSV record or SBOM that was rejected.
 
 ## 6. Smoke test — everything now flows through Pipelines as Code
 

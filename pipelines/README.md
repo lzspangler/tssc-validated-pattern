@@ -264,7 +264,7 @@ out. Every task runs unconditionally except `verify-commit` (optional) and
 | *(none)* | There is no `triggers/` directory: CI triggering is **Pipelines as Code**. The `.tekton/` PipelineRuns live in the application repository (committed by the GitLab seeding job from `components/gitlab/templates/cm-pac-pipelines.yaml`), and a PaC `Repository` CR in the pipeline namespace points PaC at the repo — PaC creates the GitLab webhooks itself. |
 | `config/ai-agent-config.yaml` | ConfigMap — the single AI backend switch (provider/model/region/effort) |
 | `config/rhtpa-enable-importers-job.yaml` | Job — idempotently enables + forces the RHTPA Red Hat SBOM/CSAF importers |
-| `ops/rhtpa-upload-advisory.sh` | Script — uploads/verifies/deletes a **single** advisory document (OSV/CSAF/…) in RHTPA, for records no importer covers |
+| `components/ops (the `rhtpa-upload-advisory` ConfigMap)` | Script — uploads/verifies/deletes a **single** advisory document (OSV/CSAF/…) in RHTPA, for records no importer covers |
 | `ops/rhtpa-load-lightwell-data.sh` | Script — loads **the whole Lightwell remediation dataset** (`data/osv/` + `data/sbom/`) into RHTPA and verifies it; `--verify` / `--purge` |
 | `ops/ai-agent-image-prewarm-daemonset.yaml` | DaemonSet — pre-pulls the large agent image onto every node so steps can't flake on ImagePullBackOff |
 | `data/osv/LW-DEMO-001*.json` | OSV advisories — one per CVE, each declaring the Lightwell `.rhlw-00001` backport as the `fixed` version (see [Lightwell remediation data](#lightwell-remediation-data)) |
@@ -1038,12 +1038,12 @@ The importers above are bulk feeds bound to remote **sources** — `osv-github`
 clones a git repository, `cve` the CVE List repo. None of them will pick up one
 hand-written demo record, and a flat HTTP directory of OSV JSON (an Artifactory
 generic repo, say) is **not** a valid importer source. For one-off documents use
-the ad-hoc upload endpoint instead, via `ops/rhtpa-upload-advisory.sh`:
+the ad-hoc upload endpoint instead, via `components/ops (the `rhtpa-upload-advisory` ConfigMap)`:
 
 ```sh
-ops/rhtpa-upload-advisory.sh -l source=lightwell data/osv/LW-DEMO-0012.json
-ops/rhtpa-upload-advisory.sh --verify LW-DEMO-0012     # what's ingested, all versions
-ops/rhtpa-upload-advisory.sh --delete <uuid>           # delete + wait for it to land
+components/ops (the `rhtpa-upload-advisory` ConfigMap) -l source=lightwell data/osv/LW-DEMO-0012.json
+components/ops (the `rhtpa-upload-advisory` ConfigMap) --verify LW-DEMO-0012     # what's ingested, all versions
+components/ops (the `rhtpa-upload-advisory` ConfigMap) --delete <uuid>           # delete + wait for it to land
 ```
 
 (To load the whole Lightwell dataset rather than one record, use

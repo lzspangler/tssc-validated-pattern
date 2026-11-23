@@ -30,6 +30,10 @@ data:
     if not RHTPA or not ISSUER or not CLIENT_SECRET:
         sys.exit("ERROR: TPA_URL, OIDC_ISSUER_URL and OIDC_CLIENT_SECRET must be set")
 
+    # TLS verification disabled: the script talks to in-cluster Routes
+    # (RHTPA, Keycloak) whose serving certs are signed by the cluster's
+    # internal CA, not a publicly-trusted root. For a demo this is
+    # acceptable; for production, mount the cluster CA bundle and verify.
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -57,7 +61,7 @@ data:
     if not token_url:
         sys.exit("ERROR: no token_endpoint in OIDC discovery")
 
-    st, tok = req(token_url, form={
+    st, tok = req(token_url, method="POST", form={
         "grant_type": "client_credentials",
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
@@ -99,6 +103,18 @@ data:
     if not sbom_files:
         sys.exit("ERROR: no SBOM files found in /data/sbom/")
     for f in sbom_files:
+        # Idempotency: check the serialNumber before posting. Re-posting
+        # an SBOM that already exists creates a duplicate entry (or fails,
+        # depending on RHTPA version), and on Job retries the same file
+        # would fail repeatedly without this check.
+        serial = json.load(open(f)).get("serialNumber", "")
+        if serial:
+            st, existing = req(
+                RHTPA + "/api/v3/sbom?q=" + urllib.parse.quote(serial),
+                headers=AUTH)
+            if st == 200 and existing and existing.get("items"):
+                print("  SBOM %-44s already present (serial: %s)" % (os.path.basename(f), serial[:20]))
+                continue
         body = open(f, "rb").read()
         r = urllib.request.Request(
             RHTPA + "/api/v3/sbom?labels.source=lightwell&labels.tier=remediated",
@@ -124,8 +140,8 @@ data:
     for base_purl, expected_version in CHECKS:
         from urllib.parse import quote
         st, doc = req(V3 + "/purl/base/" + quote(base_purl, safe=""), headers=AUTH)
-        if st != 200:
-            print("  [FAIL] base PURL %s not found" % base_purl); rc = 1; continue
+        if st != 200 or not doc:
+            print("  [FAIL] base PURL %s not found (HTTP %s)" % (base_purl, st)); rc = 1; continue
         versions = [v.get("version", "") for v in (doc.get("versions") or [])]
         if expected_version in versions:
             print("  [ok]   %s@%s is a known version" % (base_purl.split("/")[-1], expected_version))
@@ -138,7 +154,12 @@ data:
             for adv in (doc.get("advisories") or []):
                 for s in (adv.get("status") or []):
                     statuses.add(s.get("status", ""))
-            if "fixed" in statuses:
+            # "affected" alongside "fixed" means the version is BOTH
+            # declared fixed AND still matches a version-range -- the
+            # ranges in the OSV records need tightening, not a pass.
+            if "affected" in statuses:
+                print("  [FAIL] %s@%s still has affected status: %s" % (base_purl.split("/")[-1], expected_version, statuses)); rc = 1
+            elif "fixed" in statuses:
                 print("  [ok]   %s@%s has fixed status" % (base_purl.split("/")[-1], expected_version))
             elif not statuses:
                 print("  [ok]   %s@%s has no advisory matches (scans clean)" % base_purl.split("/")[-1])
@@ -146,6 +167,7 @@ data:
                 print("  [FAIL] %s@%s statuses: %s (expected fixed or none)" % (base_purl.split("/")[-1], expected_version, statuses)); rc = 1
         else:
             print("  [WARN] %s@%s: could not read purl status (%s)" % (base_purl.split("/")[-1], expected_version, st))
+            rc = 1  # a failed status query means we cannot confirm the fix
 
     print("\n%s" % ("OK: Lightwell data loaded and verified" if rc == 0 else "FAILURES detected"))
     sys.exit(rc)

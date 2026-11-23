@@ -26,6 +26,10 @@ spec:
         oidc_client_id: tpa-cli
         tpa_url: {{ .Values.tpa.url | quote }}
         oidc_issuer_url: {{ .Values.oidc.issuerUrl | quote }}
+        # The remoteRef'd value must be rendered in the template too:
+        # ESO's default mergePolicy is Replace, which drops data[] entries
+        # not present in the template.
+        oidc_client_secret: '{{ "{{" }} .oidc_client_secret {{ "}}" }}'
   data:
     - secretKey: oidc_client_secret
       remoteRef:
@@ -52,9 +56,31 @@ spec:
         - name: load
           image: registry.access.redhat.com/ubi9/python-312:latest
           command: ["python3", "-I", "/scripts/load.py"]
-          envFrom:
-            - secretRef:
-                name: ops-tpa-credentials
+          # Explicit env entries (not envFrom): the Secret's keys are
+          # lowercase (oidc_client_id, tpa_url, ...) but the script expects
+          # uppercase env vars (TPA_URL, OIDC_ISSUER_URL, ...). envFrom
+          # would import the lowercase names verbatim.
+          env:
+            - name: TPA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: tpa_url
+            - name: OIDC_ISSUER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: oidc_issuer_url
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: oidc_client_id
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: oidc_client_secret
           volumeMounts:
             - name: script
               mountPath: /scripts
