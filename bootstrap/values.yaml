@@ -231,6 +231,14 @@ components:
       # Empty derives https://s3-openshift-storage.<domain>:443
       regionEndpoint: ""
 
+  # Operational jobs that run after the platform is up:
+  #   * Lightwell data loading into RHTPA (the .rhlw-* backports)
+  #   * Agent image pre-warming (DaemonSet)
+  #   * Ad-hoc upload tooling (ConfigMap)
+  ops:
+    enabled: true
+    syncWave: "16"
+
   # The example application's dev/qa/prod environments — the consumer end of
   # the CD chain. Wave 16, AFTER everything else, deliberately: each
   # Application's health includes the Deployment pulling its image, and the

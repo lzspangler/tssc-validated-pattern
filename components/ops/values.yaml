@@ -1,0 +1,49 @@
+# -----------------------------------------------------------------------------
+# Operational tasks that run AFTER the platform is up:
+#
+#   rhtpa-load-lightwell-data    A Job that uploads the Lightwell OSV
+#                                advisories and catalog SBOMs into RHTPA,
+#                                making the `.rhlw-*` backports known and
+#                                `fixed`. Without this the demo runs but the
+#                                AI has no recommended backport to suggest.
+#                                Idempotent: existing entries are verified,
+#                                not re-uploaded.
+#
+#   ai-agent-image-prewarm       A DaemonSet that pre-pulls the ~1.8 GB
+#                                agent image onto every node so Tekton steps
+#                                never hit a transient CDN failure on first
+#                                pull. Optional but recommended.
+#
+#   rhtpa-upload-advisory        A ConfigMap (not a Job) holding the ad-hoc
+#                                upload script — exec into any pod with the
+#                                ConfigMap mounted to push a single document
+#                                by hand for testing.
+#
+# This component runs AFTER rhtpa-operator (wave 15) so RHTPA is serving
+# before the data-loading Job starts.
+# -----------------------------------------------------------------------------
+
+# Namespace for the prewarm DaemonSet (the pipeline namespace, where Tekton
+# steps run).
+pipelineNamespace: tssc-app-ci
+
+# The agent image to prewarm. Bump this whenever the tasks' GIT_IMAGE /
+# agent-image tag changes.
+agentImage: quay.io/sscdemo/ai-agent-maven-aider:v1.0.1
+
+# RHTPA connection for the data-loading Job. Set by bootstrap from the
+# tpa-secret's bombastic_api_url.
+tpa:
+  url: ""
+
+# Keycloak OIDC issuer for the tpa-cli client (set by bootstrap).
+oidc:
+  issuerUrl: ""
+
+# Vault wiring for the ExternalSecret (reads tpa-secret).
+vault:
+  kvMount: secret
+  pathPrefix: tssc-validated-pattern
+  secretStoreName: vault-cluster
+
+syncWave: "16"
