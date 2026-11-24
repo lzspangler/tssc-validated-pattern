@@ -14,7 +14,10 @@
 # includes the Deployment pulling its image, and on a fresh cluster the
 # imported values file's initial tag does not exist in Quay until the first
 # ci-build-publish run promotes a real one. Expect ImagePullBackOff here
-# until promotions land -- that is the demo working as designed.
+# until promotions land -- that is the demo working as designed. The
+# install-time smoke (the seeding job's demo-smoke PipelineRun, see
+# pipelines/pipelines/demo-smoke.yaml) lands those first promotions for
+# every environment, so the board goes green shortly after install.
 # -----------------------------------------------------------------------------
 ---
 apiVersion: argoproj.io/v1alpha1
