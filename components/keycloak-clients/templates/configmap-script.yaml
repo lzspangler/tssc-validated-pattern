@@ -213,14 +213,27 @@ data:
     # --- demo user (RHTPA console login) -----------------------------------
     # A fresh realm has NO users: without one, the RHTPA UI has a login page
     # nobody can authenticate to. Create the user, set the password from the
-    # Vault-backed Secret, and assign the roles the console needs. Idempotent:
-    # existing users keep their password (re-running only asserts the roles).
+    # Vault-backed Secret, and assign the roles the console needs.
+    #
+    # The password is CONVERGED on every run, not just at creation: this
+    # job is one-shot, so a user created with one Secret value and a Vault
+    # entry that later changed (the feature's first rollout raced the
+    # Secret's materialization on cluster-dl265) would otherwise keep a
+    # stale password forever -- the console login fails with
+    # invalid_grant and nothing in the cluster says why. The Vault-backed
+    # Secret is the source of truth for a demo user's password; re-running
+    # asserts it.
     if CFG.get("demoUser"):
         du = CFG["demoUser"]
         st, found = req("GET", "%s/users?username=%s" % (BASE, du["username"]), token=TOKEN)
         if st == 200 and found:
             user_id = found[0]["id"]
-            print("user         %-18s exists (password unchanged)" % du["username"])
+            st, err = req("PUT", "%s/users/%s/reset-password" % (BASE, user_id),
+                          body={"type": "password", "value": du["password"], "temporary": False},
+                          token=TOKEN)
+            if st != 204:
+                sys.exit("ERROR: converging password for %s: %s %s" % (du["username"], st, err))
+            print("user         %-18s exists (password converged to Vault)" % du["username"])
         else:
             st, err = req("POST", BASE + "/users", body={
                 "username": du["username"],
