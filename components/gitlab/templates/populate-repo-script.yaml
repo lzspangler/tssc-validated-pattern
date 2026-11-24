@@ -44,8 +44,17 @@ data:
     done < <(find "${SOURCE_DIR}" -type f -print0)
     ACTIONS+="]"
 
-    # Build the request body
-    BODY=$(printf '{"branch":"%s","commit_message":"Initial import from tssc-validated-pattern","actions":%s}' "${BRANCH}" "${ACTIONS}")
+    # Build the request body. Written to a FILE and sent with `--data @file`:
+    # the body carries every file's base64 content as ONE exec argument to
+    # curl, and the kernel caps a single argument at 128 KiB
+    # (MAX_ARG_STRLEN). A large file in the source tree -- the lightwell
+    # app originally carried a ~3 MB generated sbom.json, ~4 MB base64 --
+    # makes execve(2) fail with E2BIG and curl dies with "Argument list
+    # too long" (rc 126), leaving the GitLab project created but empty.
+    # The printf building ACTIONS is a bash builtin, so it never execs and
+    # is NOT subject to the limit; only the external curl call was.
+    BODY_FILE=$(mktemp)
+    printf '{"branch":"%s","commit_message":"Initial import from tssc-validated-pattern","actions":%s}' "${BRANCH}" "${ACTIONS}" > "${BODY_FILE}"
 
     FILE_COUNT=$(printf '%s' "${ACTIONS}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
     echo "Committing ${FILE_COUNT} files to ${PROJECT_SLUG} on ${BRANCH}"
@@ -55,7 +64,7 @@ data:
       "https://${GITLAB_HOST}/api/v4/projects/${PROJECT_SLUG}/repository/commits" \
       --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
       --header "Content-Type: application/json" \
-      --data "${BODY}")
+      --data "@${BODY_FILE}")
 
     echo "${RESP}" | python3 -c '
     import json,sys
