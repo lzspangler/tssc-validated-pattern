@@ -50,6 +50,15 @@ runs it once GitLab is up. In order:
    repo's dev/qa/prod values files once each — so every environment
    Application lands Healthy instead of sitting in ImagePullBackOff on the
    initial `latest` tag (see `pipelines/pipelines/demo-smoke.yaml`).
+10. Starts the **agentic CVE analysis** (`cve-analysis-<repo>` PipelineRun,
+   one per application, with a 3h timeout and the repo's own SCM secret as
+   `git-auth`): the same run an operator starts by hand with
+   `tkn pipeline start agentic-cve-analysis`, so the demo opens with CVE
+   issues already filed on the boards. Before creating the runs the job
+   waits for the pipeline itself plus the `tpa-secret`, `ai-agent-secret`
+   and `maven-settings` Secrets — a PipelineRun whose secret-backed
+   workspace binds a missing Secret hangs in PodInitializing forever
+   rather than failing.
 
 Steps 5–9 are additions. Upstream imports repositories but has no concept of
 labels on them, no webhooks, and no credential hand-off; on the reference

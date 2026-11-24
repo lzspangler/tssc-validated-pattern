@@ -1182,4 +1182,132 @@ data:
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{- $quay := printf "quay.%s" (required "Set cluster.subdomain" .Values.cluster.subdomain) }}
+
+        # =================================================================
+        # Agentic CVE analysis for every example application: the same run
+        # an operator starts by hand (tkn pipeline start agentic-cve-analysis
+        # ...), started once at install time so the demo opens with CVE
+        # issues already filed on the boards. It builds its own :analysis
+        # image and is independent of the smoke above.
+        #
+        # The WAITS below are not optional: a PipelineRun whose secret-backed
+        # workspace (maven-settings / git-auth) binds a missing Secret hangs
+        # its pod in PodInitializing FOREVER rather than failing, burning the
+        # whole 3h pipeline timeout. maven-settings is written by the
+        # Artifactory component's post-install Job -- the slowest thing on a
+        # fresh cluster -- so it gets twice the retry budget of the rest.
+        # =================================================================
+
+        - name: Wait for the agentic-cve-analysis Pipeline to be installed
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: Pipeline
+            namespace: {{ $pipelineNs }}
+            name: agentic-cve-analysis
+          register: r_analysis_pipeline
+          until: r_analysis_pipeline is not failed and (r_analysis_pipeline.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Wait for the tpa-secret Secret (RHTPA upload credentials)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            namespace: {{ $pipelineNs }}
+            name: tpa-secret
+          register: r_tpa_secret
+          until: r_tpa_secret is not failed and (r_tpa_secret.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Wait for the ai-agent-secret Secret (the CVE analyzer's API key)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            namespace: {{ $pipelineNs }}
+            name: ai-agent-secret
+          register: r_ai_secret
+          until: r_ai_secret is not failed and (r_ai_secret.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Wait for the maven-settings Secret (Artifactory-backed resolution)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            namespace: {{ $pipelineNs }}
+            name: maven-settings
+          register: r_maven_settings
+          until: r_maven_settings is not failed and (r_maven_settings.resources | default([]) | length > 0)
+          retries: 180
+          delay: 10
+
+{{- range $group := .Values.gitlab.groups }}
+{{- range $repo := $group.repo }}
+{{- if (index $repo "pac" | default dict).enabled }}
+{{- $scm := "scm-auth-secret" }}
+{{- if $repo.accessToken }}{{ $scm = $repo.accessToken.secretName | default "scm-auth-secret" }}{{ end }}
+
+        - name: Start the agentic-cve-analysis PipelineRun for {{ $repo.name }}
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                # Fixed name, same policy as the smoke: a re-seed finds the
+                # existing run and leaves it alone. Delete the PipelineRun
+                # (and re-sync) to analyze again.
+                name: cve-analysis-{{ $repo.name }}
+                namespace: {{ $pipelineNs }}
+                labels:
+                  app.kubernetes.io/part-of: tssc-validated-pattern
+                  tekton.dev/pipeline: agentic-cve-analysis
+              spec:
+                pipelineRef:
+                  name: agentic-cve-analysis
+                taskRunTemplate:
+                  serviceAccountName: pipeline
+                # The pipeline is ~40 min of RHTPA tasks plus 45-90 min of
+                # model-gated analysis; the console's implicit 1h would kill
+                # it, so this pins the same 3h the tkn invocation uses.
+                timeouts:
+                  pipeline: 3h0m0s
+                params:
+                  - name: component-name
+                    value: {{ $repo.name }}
+                  - name: git-url
+                    value: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}.git
+                  - name: revision
+                    value: main
+                  - name: output-image
+                    value: {{ $quay }}/tssc/{{ $repo.name }}:analysis
+                  - name: git-host
+                    value: {{ $host }}
+                  - name: scm-provider
+                    value: gitlab
+                  - name: scm-secret-name
+                    value: {{ $scm }}
+                workspaces:
+                  - name: workspace
+                    volumeClaimTemplate:
+                      spec:
+                        accessModes: [ReadWriteOnce]
+                        resources:
+                          requests:
+                            storage: 5Gi
+                  - name: maven-settings
+                    secret:
+                      secretName: maven-settings
+                  # The repo's OWN project-bot token (a project bot is a
+                  # member of exactly one project) -- this is also the
+                  # secret open-cve-issues pushes issues with.
+                  - name: git-auth
+                    secret:
+                      secretName: {{ $scm }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
