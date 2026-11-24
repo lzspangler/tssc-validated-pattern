@@ -1128,7 +1128,16 @@ data:
           # The Pipeline is synced by the tekton-pipelines Application
           # (root-app waves 3-5); this job can start first, so retry until
           # it lands rather than assuming ordering.
-          until: r_smoke_pipeline.resources | length > 0
+          #
+          # The until MUST guard on failure first: a failed lookup (a 403
+          # from missing RBAC, an API hiccup) returns a dict with NO
+          # "resources" key, and reading .resources on it crashes the
+          # conditional evaluation itself -- the task dies on attempt one
+          # instead of retrying, which is exactly how this play first
+          # failed (the SA held pipelineruns rights but not pipelines).
+          # The `is not failed` guard short-circuits the `and`, so a
+          # failed attempt retries instead of aborting.
+          until: r_smoke_pipeline is not failed and (r_smoke_pipeline.resources | default([]) | length > 0)
           retries: 90
           delay: 10
 
