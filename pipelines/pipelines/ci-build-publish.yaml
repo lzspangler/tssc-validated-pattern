@@ -163,6 +163,31 @@ spec:
         bumping image.tag in the gitops repo's dev values file). Set "false" to
         build and publish without promoting to dev.
       default: "true"
+    # Where the finally task's gitops-cd-dev run promotes to. The defaults
+    # serve the spring-boot example on the reference cluster; the per-repo
+    # .tekton/ definitions (components/gitlab cm-pac-pipelines) pass these
+    # explicitly per application. WITHOUT them every application's CI
+    # promotes into the FIRST application's gitops repo -- on cluster-dl265
+    # a lightwell build wrote its tag into spring-boot's dev values.
+    # gitops-url / git-host are rewritten on cluster moves by the
+    # tekton-cluster-defaults Job (components/pipelines), same as on
+    # gitops-cd-{dev,qa,prod}.
+    - name: gitops-url
+      type: string
+      description: GitLab URL of the gitops repository to promote into.
+      default: https://gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io/development/spring-boot-example-gitops
+    - name: git-host
+      type: string
+      description: Host of the SCM serving the gitops repository.
+      default: gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io
+    - name: values-path
+      type: string
+      description: Values file inside the gitops repo whose image.tag is bumped.
+      default: app/spring-boot-example/environments/dev/values.yaml
+    - name: scm-gitops-secret-name
+      type: string
+      description: Secret holding the gitops repository's own project access token.
+      default: scm-auth-gitops-secret
   results:
     - name: IMAGE_URL
       value: $(tasks.build-container.results.IMAGE_URL)
@@ -346,6 +371,16 @@ spec:
           value: $(params.git-url)
         - name: APP_COMMIT
           value: $(tasks.clone-repository.results.commit)
+        # Per-application promotion routing; see the params above for why
+        # these cannot be left to gitops-cd-dev's defaults.
+        - name: GITOPS_URL
+          value: $(params.gitops-url)
+        - name: GIT_HOST
+          value: $(params.git-host)
+        - name: VALUES_PATH
+          value: $(params.values-path)
+        - name: SCM_SECRET_NAME
+          value: $(params.scm-gitops-secret-name)
       taskRef:
         kind: Task
         name: start-gitops-cd-dev

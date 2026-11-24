@@ -43,8 +43,15 @@ runs it once GitLab is up. In order:
 8. Mints a **project** access token per application repository and writes
    each into the pipeline namespace under its own Secret
    (`scm-auth-secret`, `scm-auth-lightwell-secret`).
+9. Starts the **install-time smoke** (`demo-smoke-<component>` PipelineRun,
+   one per application, from the gitops entry's `rewriteImageRepository`
+   routing): it waits for the first `ci-build-publish` run the `.tekton`
+   commit in step 7 triggered, then promotes that image through the gitops
+   repo's dev/qa/prod values files once each — so every environment
+   Application lands Healthy instead of sitting in ImagePullBackOff on the
+   initial `latest` tag (see `pipelines/pipelines/demo-smoke.yaml`).
 
-Steps 5–8 are additions. Upstream imports repositories but has no concept of
+Steps 5–9 are additions. Upstream imports repositories but has no concept of
 labels on them, no webhooks, and no credential hand-off; on the reference
 cluster all of that was done by hand.
 
