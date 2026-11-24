@@ -58,7 +58,14 @@ runs it once GitLab is up. In order:
    waits for the pipeline itself plus the `tpa-secret`, `ai-agent-secret`
    and `maven-settings` Secrets — a PipelineRun whose secret-backed
    workspace binds a missing Secret hangs in PodInitializing forever
-   rather than failing.
+   rather than failing. This step (like the smoke) is gated on
+   `pac.pipelineRuns`, which bootstrap derives from the Tekton component:
+   without the Tekton layer the Pipelines are never installed, and the
+   waits would abort the seeding. The runs themselves pass
+   `registry-wait-timeout: 30m` — they are created at wave 8 while the
+   wave-10 Quay component may still be configuring, and the run (not the
+   job, which would deadlock the waves) waits for the `quay-push`
+   credential before building.
 
 Steps 5–9 are additions. Upstream imports repositories but has no concept of
 labels on them, no webhooks, and no credential hand-off; on the reference

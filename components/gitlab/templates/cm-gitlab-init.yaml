@@ -1092,7 +1092,13 @@ data:
 {{- end }}
 {{- end }}
 
-{{- if and .Values.pac.enabled $pipelineNs }}
+{{- /* pipelineRuns defaults to TRUE when unset -- but `| default true`
+       cannot express that, because the default filter fires on ANY falsy
+       value, including an explicit false (false | default true == true!).
+       hasKey distinguishes "not configured" from "configured false". */}}
+{{- $pipelineRuns := true }}
+{{- if hasKey .Values.pac "pipelineRuns" }}{{ $pipelineRuns = .Values.pac.pipelineRuns }}{{ end }}
+{{- if and .Values.pac.enabled $pipelineRuns $pipelineNs }}
 
 {{- range $group := .Values.gitlab.groups }}
 {{- range $repo := $group.repo }}
@@ -1171,6 +1177,11 @@ data:
                     value: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}
                   - name: git-host
                     value: {{ $host }}
+                  # The gitops repo's own default branch: hard-coding main
+                  # would break promotion MRs for a repo configured with a
+                  # different defaultBranch.
+                  - name: base-branch
+                    value: {{ $repo.defaultBranch | default "main" }}
                   - name: dev-values-path
                     value: {{ $chartPath }}/environments/dev/values.yaml
                   - name: qa-values-path
@@ -1280,10 +1291,20 @@ data:
                     value: {{ $repo.name }}
                   - name: git-url
                     value: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}.git
+                  # The repo's configured default branch: hard-coding main
+                  # would fail the clone for a repo whose defaultBranch is
+                  # something else (populate commits defaultBranch, this run
+                  # must check it out).
                   - name: revision
-                    value: main
+                    value: {{ $repo.defaultBranch | default "main" }}
                   - name: output-image
                     value: {{ $quay }}/tssc/{{ $repo.name }}:analysis
+                  # The run starts while the wave-10 Quay component may
+                  # still be configuring; the run waits for the push
+                  # credential itself (see wait-for-registry -- the seeding
+                  # job cannot, without deadlocking the later waves).
+                  - name: registry-wait-timeout
+                    value: 30m
                   - name: git-host
                     value: {{ $host }}
                   - name: scm-provider
