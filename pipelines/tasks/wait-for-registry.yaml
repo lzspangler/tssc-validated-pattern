@@ -90,23 +90,41 @@ spec:
 
         echo "Waiting up to ${PARAM_TIMEOUT} for ${PARAM_SECRET_NAME} in ${PARAM_NAMESPACE} (linked to SA ${PARAM_SERVICE_ACCOUNT})"
 
-        api() {
+        # Fetch one URL, printing "body\nstatus". TRANSPORT failures (a
+        # connection reset, the API server restarting mid-poll) are NOT
+        # fatal: || true keeps the step alive and yields an empty response,
+        # which the caller reads as status "" -- i.e. not ready yet, poll
+        # again. Without this, one blip under `set -euo pipefail` would
+        # terminate the step and forfeit the whole TIMEOUT window.
+        fetch() {
           curl -sS --cacert "${SA_DIR}/ca.crt" \
             -H "Authorization: Bearer ${TOKEN}" \
-            -w '\n%{http_code}' "$@"
+            -w '\n%{http_code}' "$1" || true
         }
 
         DEADLINE=$(( $(date +%s) + TIMEOUT_SECONDS ))
         while :; do
-          # Secret exists ...
-          SECRET_CODE="$(api "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/secrets/${PARAM_SECRET_NAME}" | tail -n1)"
-          # ... and the ServiceAccount carries it (the link buildah's push uses).
-          SA_CODE="$(api "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/serviceaccounts/${PARAM_SERVICE_ACCOUNT}" | tail -n1)"
+          # The Secret must exist ...
+          RESP="$(fetch "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/secrets/${PARAM_SECRET_NAME}")"
+          SECRET_CODE="${RESP##*$'\n'}"
+          # ... and the ServiceAccount must carry it (the link buildah's
+          # push authenticates with). One fetch: the body is kept for the
+          # jq check below.
+          RESP="$(fetch "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/serviceaccounts/${PARAM_SERVICE_ACCOUNT}")"
+          SA_CODE="${RESP##*$'\n'}"
+          SA_BODY="${RESP%$'\n'*}"
 
           if [ "${SECRET_CODE}" = "200" ] && [ "${SA_CODE}" = "200" ]; then
-            LINKED="$(api "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/serviceaccounts/${PARAM_SERVICE_ACCOUNT}" \
-              | head -n1 | jq -r --arg s "${PARAM_SECRET_NAME}" \
-                 '([(.secrets // [])[]?.name] + [(.imagePullSecrets // [])[]?.name]) | index($s) != null')"
+            # The COMPLETE body goes to jq. The apiserver pretty-prints
+            # JSON for curl user-agents, so the body spans many lines --
+            # piping only its first line (a lone "{") into jq is a parse
+            # error that would kill the step even when everything is
+            # ready. A jq failure of its own (malformed body) also must
+            # not abort the step: treat it as not-ready and keep polling.
+            if ! LINKED="$(printf '%s' "${SA_BODY}" | jq -r --arg s "${PARAM_SECRET_NAME}" \
+                 '([(.secrets // [])[]?.name] + [(.imagePullSecrets // [])[]?.name]) | index($s) != null' 2>/dev/null)"; then
+              LINKED=""
+            fi
             if [ "${LINKED}" = "true" ]; then
               echo "${PARAM_SECRET_NAME} exists and is linked to SA ${PARAM_SERVICE_ACCOUNT}; pushes can proceed."
               exit 0

@@ -98,9 +98,13 @@ spec:
         WANT_URL="${PARAM_APP_REPO_URL%.git}"
 
         list_runs() {
+          # A transport failure (connection reset, API blip) must not kill
+          # the step under `set -euo pipefail` -- it would forfeit the
+          # whole wait window. Emit nothing instead; the jq below maps an
+          # empty response to an empty match list and the loop polls again.
           curl -sS --cacert "${SA_DIR}/ca.crt" \
             -H "Authorization: Bearer ${TOKEN}" \
-            "${API}/apis/tekton.dev/v1/namespaces/${PARAM_NAMESPACE}/pipelineruns?labelSelector=tekton.dev%2Fpipeline%3D${PARAM_PIPELINE}"
+            "${API}/apis/tekton.dev/v1/namespaces/${PARAM_NAMESPACE}/pipelineruns?labelSelector=tekton.dev%2Fpipeline%3D${PARAM_PIPELINE}" || true
         }
 
         # Summarize every run of this pipeline for THIS repo: name, status,
