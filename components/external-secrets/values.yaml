@@ -3,9 +3,12 @@
 # (openshift-external-secrets-operator, channel stable-v1), plus the
 # ClusterSecretStore that fronts the cluster's EXISTING Vault.
 #
-# The operator subscription uses Manual installPlan approval; the InstallPlan
-# approver Job in this chart approves it as soon as it appears (the x2a-fsc
-# pattern) so a GitOps install does not stall waiting for a human.
+# The operator subscription uses Automatic installPlan approval, like every
+# other operator in this repo. It was Manual with a wave-later approver Job
+# once (the x2a-fsc pattern); that DEADLOCKS a GitOps install -- Argo admits
+# the approver's sync-wave only after the Subscription is Healthy, and the
+# Subscription is Healthy only after the InstallPlan is approved, by that
+# approver (proved on cluster-hnjcl).
 #
 # The ClusterSecretStore authenticates with a static token read from Secret
 # <vault.tokenSecretName> in <vault.namespace> -- the same platform-provided
