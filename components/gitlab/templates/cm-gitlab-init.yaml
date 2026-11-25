@@ -1147,16 +1147,34 @@ data:
           retries: 90
           delay: 10
 
+        - name: Check for an existing demo-smoke run for {{ $rewrite.component }}
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: PipelineRun
+            namespace: {{ $pipelineNs }}
+            name: demo-smoke-{{ $rewrite.component }}
+          register: r_smoke_run
+
+        # Create-only, on purpose. Tekton's validating webhook rejects ANY
+        # spec update to a completed PipelineRun ("Once the PipelineRun is
+        # complete, no updates are allowed"), and the creation-time
+        # defaulting webhook adds fields the rendered manifest lacks -- so a
+        # converge-style patch on an existing run ALWAYS fires and is ALWAYS
+        # rejected, failing the whole seeding on re-seed. Looking first and
+        # skipping when present is what actually implements the fixed-name
+        # policy; delete the PipelineRun (and re-sync) to run the smoke
+        # again.
         - name: Start the demo-smoke PipelineRun for {{ $rewrite.component }}
+          when: (r_smoke_run.resources | default([]) | length) == 0
           kubernetes.core.k8s:
             state: present
             definition:
               apiVersion: tekton.dev/v1
               kind: PipelineRun
               metadata:
-                # Fixed name on purpose: re-running this playbook (a re-seed)
-                # finds the existing run and leaves it alone. To force a
-                # re-run, delete the PipelineRun first and re-sync.
+                # Fixed name; the create-only guard above makes a re-seed
+                # leave the existing run alone. Delete the PipelineRun
+                # first (and re-sync) to run the smoke again.
                 name: demo-smoke-{{ $rewrite.component }}
                 namespace: {{ $pipelineNs }}
                 labels:
@@ -1261,16 +1279,28 @@ data:
 {{- $scm := "scm-auth-secret" }}
 {{- if $repo.accessToken }}{{ $scm = $repo.accessToken.secretName | default "scm-auth-secret" }}{{ end }}
 
+        - name: Check for an existing cve-analysis run for {{ $repo.name }}
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: PipelineRun
+            namespace: {{ $pipelineNs }}
+            name: cve-analysis-{{ $repo.name }}
+          register: r_analysis_run
+
+        # Create-only, for the same reason as the smoke runs above: a
+        # completed PipelineRun rejects every spec update, and the
+        # defaulting webhook guarantees the rendered manifest never
+        # matches the live object -- so converge-patching an existing run
+        # fails the whole seeding. Delete the PipelineRun (and re-sync)
+        # to analyze again.
         - name: Start the agentic-cve-analysis PipelineRun for {{ $repo.name }}
+          when: (r_analysis_run.resources | default([]) | length) == 0
           kubernetes.core.k8s:
             state: present
             definition:
               apiVersion: tekton.dev/v1
               kind: PipelineRun
               metadata:
-                # Fixed name, same policy as the smoke: a re-seed finds the
-                # existing run and leaves it alone. Delete the PipelineRun
-                # (and re-sync) to analyze again.
                 name: cve-analysis-{{ $repo.name }}
                 namespace: {{ $pipelineNs }}
                 labels:
