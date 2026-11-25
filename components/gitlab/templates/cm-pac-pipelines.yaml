@@ -134,6 +134,19 @@ data:
         - name: scm-gitops-secret-name
           value: {{ $gi.secret | quote }}
 {{- end }}
+        # The first CI run on a fresh cluster is fired by the seeding
+        # job's .tekton commit (wave 8) and can beat the wave-10 Quay
+        # configuration to its image push; the run waits for the push
+        # credential itself (wait-for-registry). Later runs find it
+        # immediately -- and the wait task is skipped entirely when this
+        # is "0".
+        - name: registry-wait-timeout
+          value: "30m"
+        # ... and the same for RHTPA (wave 10): the first CI run must not
+        # upload its SBOM against an RHTPA that is still starting. The
+        # wait runs concurrently with the build, so it costs no time.
+        - name: trustification-wait-timeout
+          value: "30m"
       workspaces:
         - name: workspace
           volumeClaimTemplate:

@@ -1,0 +1,178 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: wait-for-registry
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.41.0"
+    tekton.dev/tags: "tekton, quay"
+spec:
+  description: >-
+    Wait until image pushes to this cluster's Quay can succeed, then exit.
+    Readiness is the quay-push Secret existing in the pipeline namespace AND
+    being linked to the run's ServiceAccount -- that is exactly what
+    buildah's push authenticates with, and both are created by the Quay
+    component's post-config Job, which runs a full Argo wave AFTER the
+    GitLab seeding Job that starts the install-time runs. Without this wait
+    a freshly-started run can reach its build-container push before the
+    wave-10 Quay configuration lands, fail the push, and (fixed-name runs)
+    stay failed until deleted by hand.
+
+    The wait CANNOT live in the seeding Job instead: the Job completing is
+    what lets the later waves sync, so a Job-side wait for a wave-10
+    resource deadlocks the install. The pipeline run is the only place
+    that can absorb the skew.
+
+    Inactive by default: TIMEOUT "0" exits immediately, and the pipelines
+    gate the task behind a when-expression on the same value so ordinary
+    (manual, day-2) runs never even schedule a pod for it. Install-time
+    runs pass e.g. 30m.
+  params:
+    - name: TIMEOUT
+      type: string
+      description: >-
+        How long to wait, e.g. 30m or 1800s (a bare number means minutes).
+        "0" (or empty) disables the wait entirely.
+      default: "0"
+    - name: NAMESPACE
+      type: string
+      description: Namespace the quay-push Secret and ServiceAccount live in.
+      default: tssc-app-ci
+    - name: SERVICE_ACCOUNT
+      type: string
+      description: ServiceAccount whose secret link buildah's push relies on.
+      default: pipeline
+    - name: SECRET_NAME
+      type: string
+      description: Push-credential Secret the Quay component mints.
+      default: quay-push
+    - name: POLL_INTERVAL
+      type: string
+      description: Seconds between polls.
+      default: "15"
+    - name: GIT_IMAGE
+      type: string
+      description: >-
+        Image this task runs in (needs curl and jq). The agent image bundles
+        both.
+      default: quay.io/sscdemo/ai-agent-maven-aider:v1.0.1
+  steps:
+    - name: wait-for-quay-push
+      image: $(params.GIT_IMAGE)
+      env:
+        - name: HOME
+          value: /tekton/home
+        - name: PARAM_TIMEOUT
+          value: $(params.TIMEOUT)
+        - name: PARAM_NAMESPACE
+          value: $(params.NAMESPACE)
+        - name: PARAM_SERVICE_ACCOUNT
+          value: $(params.SERVICE_ACCOUNT)
+        - name: PARAM_SECRET_NAME
+          value: $(params.SECRET_NAME)
+        - name: PARAM_POLL_INTERVAL
+          value: $(params.POLL_INTERVAL)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        case "${PARAM_TIMEOUT}" in
+          ""|"0") echo "registry wait disabled (TIMEOUT=0)"; exit 0 ;;
+          *m) TIMEOUT_SECONDS=$(( ${PARAM_TIMEOUT%m} * 60 )) ;;
+          *s) TIMEOUT_SECONDS=${PARAM_TIMEOUT%s} ;;
+          *)  TIMEOUT_SECONDS=$(( PARAM_TIMEOUT * 60 )) ;;
+        esac
+
+        SA_DIR="/var/run/secrets/kubernetes.io/serviceaccount"
+        TOKEN="$(cat "${SA_DIR}/token")"
+        API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS}"
+
+        echo "Waiting up to ${PARAM_TIMEOUT} for ${PARAM_SECRET_NAME} in ${PARAM_NAMESPACE} (linked to SA ${PARAM_SERVICE_ACCOUNT})"
+
+        # Fetch one URL, printing "body\nstatus". TRANSPORT failures (a
+        # connection reset, the API server restarting mid-poll) are NOT
+        # fatal: || true keeps the step alive and yields an empty response,
+        # which the caller reads as status "" -- i.e. not ready yet, poll
+        # again. Without this, one blip under `set -euo pipefail` would
+        # terminate the step and forfeit the whole TIMEOUT window.
+        fetch() {
+          curl -sS --cacert "${SA_DIR}/ca.crt" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -w '\n%{http_code}' "$1" || true
+        }
+
+        DEADLINE=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while :; do
+          # The Secret must exist ...
+          RESP="$(fetch "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/secrets/${PARAM_SECRET_NAME}")"
+          SECRET_CODE="${RESP##*$'\n'}"
+          # ... and the ServiceAccount must carry it (the link buildah's
+          # push authenticates with). One fetch: the body is kept for the
+          # jq check below.
+          RESP="$(fetch "${API}/api/v1/namespaces/${PARAM_NAMESPACE}/serviceaccounts/${PARAM_SERVICE_ACCOUNT}")"
+          SA_CODE="${RESP##*$'\n'}"
+          SA_BODY="${RESP%$'\n'*}"
+
+          if [ "${SECRET_CODE}" = "200" ] && [ "${SA_CODE}" = "200" ]; then
+            # The COMPLETE body goes to jq. The apiserver pretty-prints
+            # JSON for curl user-agents, so the body spans many lines --
+            # piping only its first line (a lone "{") into jq is a parse
+            # error that would kill the step even when everything is
+            # ready. A jq failure of its own (malformed body) also must
+            # not abort the step: treat it as not-ready and keep polling.
+            if ! LINKED="$(printf '%s' "${SA_BODY}" | jq -r --arg s "${PARAM_SECRET_NAME}" \
+                 '([(.secrets // [])[]?.name] + [(.imagePullSecrets // [])[]?.name]) | index($s) != null' 2>/dev/null)"; then
+              LINKED=""
+            fi
+            if [ "${LINKED}" = "true" ]; then
+              echo "${PARAM_SECRET_NAME} exists and is linked to SA ${PARAM_SERVICE_ACCOUNT}; pushes can proceed."
+              exit 0
+            fi
+          fi
+
+          if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+            echo "ERROR: ${PARAM_SECRET_NAME} was not ready within ${PARAM_TIMEOUT} (secret HTTP ${SECRET_CODE}, SA HTTP ${SA_CODE})." >&2
+            echo "The Quay component's post-config Job has not finished; a build reaching its push now would fail." >&2
+            exit 1
+          fi
+
+          sleep "${PARAM_POLL_INTERVAL}"
+        done
+---
+# The RBAC this task needs when the pipelines run it as the `pipeline`
+# ServiceAccount: reading exactly ONE Secret and exactly ONE
+# ServiceAccount, pinned by resourceName -- nothing else in the namespace
+# is readable through this Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-registry-waiter
+  namespace: tssc-app-ci
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["quay-push"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: ["pipeline"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-registry-waiter
+  namespace: tssc-app-ci
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipeline-registry-waiter
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: tssc-app-ci

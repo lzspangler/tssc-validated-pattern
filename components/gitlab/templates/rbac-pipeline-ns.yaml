@@ -28,9 +28,16 @@ rules:
   # requires the Repository's creator to also hold PipelineRun create rights
   # in the target namespace -- a Repository is effectively the right to
   # trigger runs there, and the webhook enforces that up front.
+  # patch/update are ALSO required: the install-time smoke and CVE-analysis
+  # runs are FIXED-NAME objects the playbook converges with
+  # kubernetes.core.k8s state:present, which PATCHes an existing object
+  # instead of creating it. The first re-seed after a successful install is
+  # exactly the "object exists, converge it" path -- without patch rights
+  # it dies here with 403 Forbidden (one step past the missing-pipelines-
+  # rights failure, on cluster-dl265).
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "create", "patch", "update"]
   # The seeding Job's install-time smoke waits for the demo-smoke Pipeline
   # to exist before starting its PipelineRun (the tekton-pipelines
   # Application can sync later than this job starts). Without pipeline read
