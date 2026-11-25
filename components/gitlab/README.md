@@ -62,10 +62,13 @@ runs it once GitLab is up. In order:
    `pac.pipelineRuns`, which bootstrap derives from the Tekton component:
    without the Tekton layer the Pipelines are never installed, and the
    waits would abort the seeding. The runs themselves pass
-   `registry-wait-timeout: 30m` — they are created at wave 8 while the
-   wave-10 Quay component may still be configuring, and the run (not the
-   job, which would deadlock the waves) waits for the `quay-push`
-   credential before building.
+   `registry-wait-timeout: 30m` and `trustification-wait-timeout: 30m` —
+   they are created at wave 8 while the wave-10 Quay and RHTPA components
+   may still be configuring, and the run (not the job, which would
+   deadlock the waves) waits for the `quay-push` credential before
+   pushing and for RHTPA to accept uploads before the SBOM upload; both
+   waits run concurrently with the build, so they cost no wall-clock
+   time.
 
 Steps 5–9 are additions. Upstream imports repositories but has no concept of
 labels on them, no webhooks, and no credential hand-off; on the reference

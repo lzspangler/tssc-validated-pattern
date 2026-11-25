@@ -1335,6 +1335,13 @@ data:
                   # job cannot, without deadlocking the later waves).
                   - name: registry-wait-timeout
                     value: 30m
+                  # RHTPA is also wave 10, and the tpa-secret wait above
+                  # only proves the SECRET exists (ESO reads Vault,
+                  # independent of the RHTPA server) -- not that RHTPA
+                  # accepts uploads. The run waits for that itself,
+                  # concurrently with its build (wait-for-trustification).
+                  - name: trustification-wait-timeout
+                    value: 30m
                   - name: git-host
                     value: {{ $host }}
                   - name: scm-provider

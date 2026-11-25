@@ -142,6 +142,11 @@ data:
         # is "0".
         - name: registry-wait-timeout
           value: "30m"
+        # ... and the same for RHTPA (wave 10): the first CI run must not
+        # upload its SBOM against an RHTPA that is still starting. The
+        # wait runs concurrently with the build, so it costs no time.
+        - name: trustification-wait-timeout
+          value: "30m"
       workspaces:
         - name: workspace
           volumeClaimTemplate:

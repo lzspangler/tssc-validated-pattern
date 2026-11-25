@@ -119,6 +119,16 @@ spec:
     - name: trustification-secret-name
       type: string
       default: tpa-secret
+    - name: trustification-wait-timeout
+      type: string
+      description: >-
+        How long the run waits for RHTPA to accept uploads before the SBOM
+        upload (the wait runs concurrently with the build, so it costs no
+        wall-clock time). "0" skips the wait. Install-time runs (the
+        .tekton definitions committed at install) pass e.g. 30m so the
+        first CI run does not upload against an RHTPA that is still
+        starting at wave 10.
+      default: "0"
     - name: fail-if-trustification-not-configured
       type: string
       description: >-
@@ -331,6 +341,28 @@ spec:
         - name: source
           workspace: workspace
 
+    # Install-time runs race RHTPA's wave-10 startup exactly like Quay's;
+    # this wait runs CONCURRENTLY with clone/package/build (no runAfter),
+    # so it costs no wall-clock time -- it only holds the upload back
+    # until RHTPA actually accepts it. Skipped entirely ("0") for manual
+    # runs and when the SBOM upload itself is off; a skipped task still
+    # satisfies runAfter dependents.
+    - name: wait-for-trustification
+      taskRef:
+        kind: Task
+        name: wait-for-trustification
+      when:
+        - input: "$(params.upload-sbom)"
+          operator: in
+          values: ["true"]
+        - input: "$(params.trustification-wait-timeout)"
+          operator: notin
+          values: ["0", ""]
+      params:
+        - name: TRUSTIFICATION_SECRET_NAME
+          value: $(params.trustification-secret-name)
+        - name: TIMEOUT
+          value: $(params.trustification-wait-timeout)
     # Publish the SBOM to RHTPA so the agentic pipelines -- and anyone asking
     # "what is in the image we shipped?" -- have something to analyze.
     - name: upload-sbom-to-rhtpa
@@ -345,6 +377,7 @@ spec:
           value: $(params.fail-if-trustification-not-configured)
       runAfter:
         - build-container
+        - wait-for-trustification
       taskRef:
         kind: Task
         name: upload-sbom-to-rhtpa

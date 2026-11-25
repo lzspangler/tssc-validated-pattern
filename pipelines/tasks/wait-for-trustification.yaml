@@ -1,0 +1,155 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: wait-for-trustification
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.41.0"
+    tekton.dev/tags: "tekton, rhtpa"
+spec:
+  description: >-
+    Wait until RHTPA can accept SBOM uploads, then exit. Readiness is the
+    full path upload-sbom-to-rhtpa itself depends on: the OIDC issuer's
+    discovery document serves, the tpa-cli client credentials actually
+    grant a token, and the BOMbastic API answers at all (any HTTP status
+    proves serving).
+
+    Why this exists: install-time runs are created by the wave-8 GitLab
+    seeding Job, while the RHTPA components sync at wave 10 -- the run's
+    first ~15-25 minutes of clone/maven/buildah overlap RHTPA's startup.
+    The tpa-secret the seeding Job waits for only proves the SECRET is
+    materialized (ESO reads Vault, independent of the RHTPA server), not
+    that RHTPA is accepting requests. An upload that beats RHTPA fails
+    the run, and the fixed-name install-time runs are not recreated on
+    re-sync. The seeding Job cannot wait for wave-10 resources (its
+    completion is what unblocks those waves), so the run absorbs the
+    skew -- the same pattern as wait-for-registry for Quay.
+
+    The wait runs CONCURRENTLY with the build tasks (callers put it in
+    runAfter alongside build-container, not before clone), so it adds no
+    wall-clock time: by the time the build finishes, RHTPA is usually
+    already up and the wait exits immediately.
+
+    Inactive by default: TIMEOUT "0" exits immediately, and the pipelines
+    gate the task behind a when-expression on the same value so ordinary
+    (manual, day-2) runs never schedule a pod for it.
+  params:
+    - name: TRUSTIFICATION_SECRET_NAME
+      type: string
+      description: >-
+        Secret with the RHTPA connection details, the same one
+        upload-sbom-to-rhtpa reads: keys bombastic_api_url,
+        oidc_issuer_url, oidc_client_id, oidc_client_secret.
+      default: tpa-secret
+    - name: TIMEOUT
+      type: string
+      description: >-
+        How long to wait, e.g. 30m or 1800s (a bare number means minutes).
+        "0" (or empty) disables the wait entirely.
+      default: "0"
+    - name: POLL_INTERVAL
+      type: string
+      description: Seconds between polls.
+      default: "15"
+    - name: GIT_IMAGE
+      type: string
+      description: >-
+        Image this task runs in (needs curl and jq). The agent image
+        bundles both.
+      default: quay.io/sscdemo/ai-agent-maven-aider:v1.0.1
+  volumes:
+    - name: trustification-secret
+      secret:
+        secretName: $(params.TRUSTIFICATION_SECRET_NAME)
+        # optional, like the upload task's mount: a missing Secret fails
+        # the key checks below with a clear message instead of hanging the
+        # pod in PodInitializing.
+        optional: true
+  stepTemplate:
+    env:
+      - name: PARAM_TRUSTIFICATION_SECRET_NAME
+        value: $(params.TRUSTIFICATION_SECRET_NAME)
+      - name: PARAM_TIMEOUT
+        value: $(params.TIMEOUT)
+      - name: PARAM_POLL_INTERVAL
+        value: $(params.POLL_INTERVAL)
+    volumeMounts:
+      - name: trustification-secret
+        mountPath: /run/secrets/trustification
+  steps:
+    - name: wait-for-rhtpa
+      image: $(params.GIT_IMAGE)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        case "${PARAM_TIMEOUT}" in
+          ""|"0") echo "trustification wait disabled (TIMEOUT=0)"; exit 0 ;;
+          *m) TIMEOUT_SECONDS=$(( ${PARAM_TIMEOUT%m} * 60 )) ;;
+          *s) TIMEOUT_SECONDS=${PARAM_TIMEOUT%s} ;;
+          *)  TIMEOUT_SECONDS=$(( PARAM_TIMEOUT * 60 )) ;;
+        esac
+
+        SECRETS="/run/secrets/trustification"
+        read_key() {
+          local key="$1"
+          if [ -f "${SECRETS}/${key}" ]; then
+            cat "${SECRETS}/${key}"
+          else
+            echo "ERROR: the ${PARAM_TRUSTIFICATION_SECRET_NAME:-tpa-secret} Secret is missing key '${key}'." >&2
+            echo "It should carry bombastic_api_url, oidc_issuer_url, oidc_client_id, oidc_client_secret." >&2
+            exit 1
+          fi
+        }
+        bombastic_api_url="$(read_key bombastic_api_url)"
+        oidc_issuer_url="$(read_key oidc_issuer_url)"
+        oidc_client_id="$(read_key oidc_client_id)"
+        oidc_client_secret="$(read_key oidc_client_secret)"
+
+        # OpenShift Pipelines injects the cluster's trusted CA bundle here;
+        # use it when present so the route's serving cert verifies.
+        CA_ARGS=()
+        if [ -f /tekton-custom-certs/ca-bundle.crt ]; then
+          CA_ARGS=(--cacert /tekton-custom-certs/ca-bundle.crt)
+        fi
+
+        # Every curl is buffered and its failure means "not ready, poll
+        # again" -- a partial body must never reach jq (it would fail the
+        # parse under pipefail and end the wait window).
+        rhtpa_ready() {
+          local body token_endpoint
+          # 1. The OIDC issuer serves its discovery document.
+          body="$(curl -sS "${CA_ARGS[@]}" \
+            "${oidc_issuer_url%/}/.well-known/openid-configuration" 2>/dev/null)" || return 1
+          token_endpoint="$(printf '%s' "${body}" | jq -r '.token_endpoint // empty' 2>/dev/null)" || return 1
+          [ -n "${token_endpoint}" ] || return 1
+          # 2. The tpa-cli client credentials actually grant a token --
+          #    the exact grant the upload task uses.
+          body="$(curl -sS "${CA_ARGS[@]}" \
+            -u "${oidc_client_id}:${oidc_client_secret}" \
+            -d grant_type=client_credentials \
+            "${token_endpoint}" 2>/dev/null)" || return 1
+          [ "$(printf '%s' "${body}" | jq -r 'has("access_token")' 2>/dev/null)" = "true" ] || return 1
+          # 3. The SBOM API answers at all -- any HTTP status proves the
+          #    server is serving.
+          curl -sS "${CA_ARGS[@]}" -o /dev/null "${bombastic_api_url%/}" 2>/dev/null || return 1
+          return 0
+        }
+
+        echo "Waiting up to ${PARAM_TIMEOUT} for RHTPA (${oidc_issuer_url%/} + ${bombastic_api_url%/})"
+
+        DEADLINE=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while :; do
+          if rhtpa_ready; then
+            echo "RHTPA is accepting uploads; the SBOM upload can proceed."
+            exit 0
+          fi
+          if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+            echo "ERROR: RHTPA did not become ready within ${PARAM_TIMEOUT}." >&2
+            echo "The upload-sbom-to-rhtpa task would fail against it; check the rhtpa-operator and" >&2
+            echo "rhtpa-prerequisites Applications and the RHTPA pods." >&2
+            exit 1
+          fi
+          sleep "${PARAM_POLL_INTERVAL}"
+        done
