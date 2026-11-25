@@ -1,13 +1,14 @@
 # Tekton integration tests
 
 The shared runner starts each case on an explicitly selected Kubernetes context.
+The `tssc-bump-maven` case uses a test Pipeline to create a small Maven project,
+run the repository Task, and check that the dependency version changes from
+`3.14.0` to `3.15.0`.
 
 ## Run against Kind
 
 Requirements are a working Docker or Podman runtime, `make`, and network access
 to download Kind, kubectl, Tekton, and test images.
-
-Add a test case as described below before running the suite.
 
 ```sh
 make kind-integration-install-tools
@@ -19,11 +20,12 @@ make kind-integration-down
 The bootstrap creates the `ssc-demo-integration` Kind cluster, installs the pinned
 upstream Tekton Pipelines release, and restores the previous active kubectl
 context. The tests use Kind's default `standard` StorageClass for workspace PVCs.
+GitHub Actions runs `make kind-integration-test` to run all cases on every PR.
 
 Use `TEST` to run a single case on Kind.
 
 ```sh
-make kind-integration-test TEST=tasks/example-task
+make kind-integration-test TEST=tasks/tssc-bump-maven
 ```
 
 The cluster name, Kind provider, node image, and Tekton version can be changed
@@ -58,7 +60,7 @@ The target cluster needs Tekton Pipelines and a StorageClass for cases that
 request workspace PVCs.
 
 ```sh
-make integration-test TEST=tasks/example-task KUBECTL_CONTEXT=my-kubernetes-context
+make integration-test TEST=tasks/tssc-bump-maven KUBECTL_CONTEXT=my-kubernetes-context
 make integration-test-all KUBECTL_CONTEXT=my-kubernetes-context
 ```
 

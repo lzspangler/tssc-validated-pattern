@@ -806,7 +806,8 @@ spec:
                 + "| Current version | `%s` |\n" % d["current_version"]
                 + "| Recommended version | `%s` |\n" % d["fixed_version"]
                 + "| Available fixed versions | %s |\n\n" % avail_str
-                + "To remediate automatically, comment `/remediate` on this issue.\n\n"
+                + "To remediate automatically, comment `/remediate` on this issue. "
+                + "Use `/remediate-bump` to update a version declared in the Maven project.\n\n"
                 + "<!-- cve-decision\n" + marker + "\n-->\n"
             )
             with open(os.path.join(issuesdir, safe + ".title"), "w") as f:

@@ -1,10 +1,10 @@
 # =============================================================================
 # Issue-comment triggers: start a pipeline by commenting a slash-command on a
-# GitLab issue. One EventListener (one webhook / Route) hosts BOTH commands; each
-# trigger's cel `filter` picks the command it handles, so a comment only starts the
-# matching pipeline:
+# GitLab issue. One EventListener (one webhook / Route) hosts the commands.
+# Each trigger's CEL filter selects the comments that start its pipeline:
 #
-#   /remediate       ->  agentic-cve-remediation   (reads a decision from the issue)
+#   /remediate                  ->  agentic-cve-remediation
+#   /remediate-bump             ->  cve-remediation-bump
 #   /generate-tests-unit        ->  agentic-test-generation-unit
 #   /generate-tests-functional   ->  agentic-test-generation-functional
 #   /generate-tests-integration  ->  agentic-test-generation-integration
@@ -45,7 +45,7 @@
 # which the seeding job creates at Maintainer level). Fail closed: an
 # unknown human commenter is rejected, not silently run. If you seed demo
 # users (gitlab.users in the gitlab component), ADD THEM to the ['root']
-# list in all four filters -- a missing username is indistinguishable from
+# list in all command filters -- a missing username is indistinguishable from
 # an unauthorized one, and the symptom of forgetting is exactly "the
 # command did not trigger a pipeline".
 #
@@ -62,7 +62,7 @@
 #        ->  TriggerBinding (extensions/body -> params)
 #        ->  TriggerTemplate (create the PipelineRun)
 #
-# ---- /remediate --------------------------------------------------------------
+# ---- /remediate and /remediate-bump -------------------------------------------
 # The six-field decision (SELECTED / CVE_ID / PACKAGE / CURRENT_VERSION /
 # FIXED_VERSION / JUSTIFICATION) is read from the ISSUE BODY, where it must sit
 # inside an HTML-comment marker so it stays invisible in rendered markdown:
@@ -77,7 +77,7 @@
 #     -->
 #
 # A commenter can OVERRIDE any of the six fields by putting YAML or JSON directly
-# after the /remediate command (no code fences), e.g.:
+# after either remediation command (no code fences), e.g.:
 #
 #     /remediate
 #     FIXED_VERSION: 1.2.5
@@ -176,6 +176,8 @@ metadata:
     app.kubernetes.io/part-of: maven-build-ci
 spec:
   params:
+    - name: pipeline-name
+      description: Pipeline name bound to a literal value by the command's trigger.
     - name: git-url
     - name: git-host
     - name: base-branch
@@ -207,14 +209,14 @@ spec:
     - apiVersion: tekton.dev/v1
       kind: PipelineRun
       metadata:
-        generateName: agentic-cve-remediation-issue-
+        generateName: $(tt.params.pipeline-name)-issue-
         labels:
           app.kubernetes.io/part-of: maven-build-ci
-          tekton.dev/pipeline: agentic-cve-remediation
+          tekton.dev/pipeline: $(tt.params.pipeline-name)
           trigger: gitlab-issue
       spec:
         pipelineRef:
-          name: agentic-cve-remediation
+          name: $(tt.params.pipeline-name)
         params:
           - name: git-url
             value: $(tt.params.git-url)
@@ -598,7 +600,8 @@ spec:
     - name: gitlab-issue-remediate
       interceptors:
         # 1) Validate the shared secret token and that this is a comment event.
-        - ref:
+        - &remediation-note-hook
+          ref:
             name: gitlab
           params:
             - name: secretRef
@@ -608,7 +611,7 @@ spec:
             - name: eventTypes
               value:
                 - "Note Hook"
-        # 2) Only act on issue comments beginning with /remediate.
+        # 2) Match /remediate followed by whitespace or the end of the note.
         #
         # Two cel-interceptor gotchas shape the structure below:
         #
@@ -632,25 +635,22 @@ spec:
                 body.object_attributes.noteable_type == 'Issue' &&
                 body.object_attributes.system == false &&
                 (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
-                body.object_attributes.note.startsWith('/remediate')
+                body.object_attributes.note.matches('^/remediate([[:space:]]|$)')
             - name: overlays
-              value:
+              value: &remediation-raw-decision
                 # Raw decision text from the issue body's <!-- cve-decision ... --> marker.
                 - key: issueRaw
                   expression: >-
                     (has(body.issue) && has(body.issue.description) && body.issue.description != null && size(body.issue.description.split("<!-- cve-decision")) > 1) ? body.issue.description.split("<!-- cve-decision")[1].split("-->")[0] : ""
-                # Raw override text from the comment: everything after the
-                # LEADING /remediate. substring(10), not split("/remediate")[1]
-                # -- split breaks a valid override whose field VALUE contains
-                # the command again (e.g. a JUSTIFICATION mentioning
-                # /remediate), truncating the JSON/YAML mid-value.
+                # Strip only the leading command so overrides can mention it again.
                 - key: commentRaw
                   expression: >-
-                    body.object_attributes.note.startsWith('/remediate') ? body.object_attributes.note.substring(10) : ""
+                    body.object_attributes.note.translate('^/remediate(-bump)?', '')
         # (b) Parse both raw blocks into maps (parseYAML also accepts JSON). Skip
         #     parsing when there's no "key: value" content, to avoid errors on empty
         #     text. Reads extensions.issueRaw / commentRaw from the previous stage.
-        - ref:
+        - &remediation-parse-decision
+          ref:
             name: cel
           params:
             - name: overlays
@@ -663,7 +663,8 @@ spec:
                     extensions.commentRaw.contains(":") ? extensions.commentRaw.parseYAML() : {}
         # (c) Merge each field (comment > issue > default) and derive SCM coordinates.
         #     Reads extensions.issueMap / commentMap from the previous stage.
-        - ref:
+        - &remediation-merge-decision
+          ref:
             name: cel
           params:
             - name: overlays
@@ -706,6 +707,30 @@ spec:
                     (has(body.issue) && has(body.issue.iid) && body.issue.iid != null) ? string(body.issue.iid) : ""
       bindings:
         - ref: cve-remediation-issue-binding
+        - name: pipeline-name
+          value: agentic-cve-remediation
+      template:
+        ref: cve-remediation-issue-template
+    - name: gitlab-issue-remediate-bump
+      interceptors:
+        - *remediation-note-hook
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >-
+                body.object_attributes.noteable_type == 'Issue' &&
+                body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
+                body.object_attributes.note.matches('^/remediate-bump([[:space:]]|$)')
+            - name: overlays
+              value: *remediation-raw-decision
+        - *remediation-parse-decision
+        - *remediation-merge-decision
+      bindings:
+        - ref: cve-remediation-issue-binding
+        - name: pipeline-name
+          value: cve-remediation-bump
       template:
         ref: cve-remediation-issue-template
     - name: gitlab-issue-generate-tests-unit

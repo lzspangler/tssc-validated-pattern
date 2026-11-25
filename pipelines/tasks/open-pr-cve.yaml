@@ -158,7 +158,7 @@ spec:
 
         ${JUSTIFICATION}
 
-        Automated by the agentic-cve-remediation pipeline."
+        Automated by the CVE remediation pipeline."
 
         # Build an authenticated push URL from GIT_URL (strip any scheme/creds).
         REPO_PATH="$(echo "${GIT_URL}" | sed -E 's#^https?://##; s#^[^/]+/##; s#\.git$##')"
@@ -166,7 +166,7 @@ spec:
         git push "${PUSH_URL}" "${BRANCH}"
 
         TITLE="Remediate ${CVE_ID}: ${PACKAGE} -> ${FIXED_VERSION}"
-        BODY="Automated remediation from the agentic-cve-remediation pipeline.
+        BODY="Automated CVE remediation.
 
         - CVE: ${CVE_ID}
         - Dependency: ${PACKAGE} -> ${FIXED_VERSION}
