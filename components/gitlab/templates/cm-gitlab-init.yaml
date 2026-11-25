@@ -884,6 +884,48 @@ data:
             validate_certs: false
             status_code:
               - 200
+
+        # ---- initial CI trigger ----------------------------------------------
+        # The .tekton definitions above were committed BEFORE the webhooks
+        # existed (and before the Repository CR did), so their push events
+        # were LOST: on a fresh install PaC never fires the first CI run,
+        # and demo-smoke's wait-for-ci-build times out with nothing to
+        # chain onto (exactly what happened on cluster-hnjcl -- zero
+        # ci-build-publish runs after a fully green install). Now that
+        # BOTH webhooks are registered, create a marker file in the repo:
+        # its push event is what actually starts the first CI run.
+        # Create-only, like populate: a re-seed does not re-trigger.
+        # NOT under .tekton/ -- PaC parses every file there and a non-YAML
+        # marker would abort the whole event.
+        - name: Check for the CI trigger marker on {{ $repo.name }}
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/.ci-trigger?ref={{ $branch }}
+            method: GET
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
+              - 404
+          register: r_ci_trigger
+
+        - name: Trigger the initial CI run for {{ $repo.name }}
+          when: r_ci_trigger.status == 404
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/.ci-trigger
+            method: POST
+            body_format: form-urlencoded
+            body:
+              branch: {{ $branch }}
+              encoding: base64
+              # "initial CI trigger\n"
+              content: aW5pdGlhbCBISSB0cmlnZ2VyCg==
+              commit_message: Trigger the initial CI run
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 201
 {{- end }}
 {{- end }}
 
