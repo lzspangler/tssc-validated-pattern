@@ -81,6 +81,10 @@ spec:
                 secretKeyRef:
                   name: ops-tpa-credentials
                   key: oidc_client_secret
+            {{- if .Values.tls.caConfigMap }}
+            - name: INGRESS_CA_BUNDLE
+              value: /etc/ssc-ca/ca-bundle.crt
+            {{- end }}
           volumeMounts:
             - name: script
               mountPath: /scripts
@@ -88,6 +92,11 @@ spec:
               mountPath: /data/osv
             - name: sbom-data
               mountPath: /data/sbom
+            {{- if .Values.tls.caConfigMap }}
+            - name: ssc-ingress-ca
+              mountPath: /etc/ssc-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: script
           configMap:
@@ -98,3 +107,11 @@ spec:
         - name: sbom-data
           configMap:
             name: lightwell-data-sbom
+        {{- if .Values.tls.caConfigMap }}
+        - name: ssc-ingress-ca
+          configMap:
+            name: {{ .Values.tls.caConfigMap | quote }}
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
+        {{- end }}
