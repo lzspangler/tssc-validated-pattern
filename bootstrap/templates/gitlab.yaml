@@ -43,6 +43,14 @@ spec:
           namespace: {{ .Values.pipelineNamespace | quote }}
         pac:
           enabled: true
+          # The install-time PipelineRuns (demo-smoke, cve-analysis) and
+          # their waits only make sense when the Tekton layer is
+          # installed: their Pipelines are synced by the tekton-*
+          # Applications. Derived from the tekton component for the same
+          # reason as issueCommands below -- so the seeding job never
+          # waits on (or fails waiting for) a Pipeline that will never be
+          # installed.
+          pipelineRuns: {{ .Values.components.tekton.enabled }}
           # The issue-comment EventListener wiring (gitlab-webhook-secret
           # + the Note Hook webhook) only exists when Tekton is installed:
           # bootstrap derives it from the tekton component so the seeding

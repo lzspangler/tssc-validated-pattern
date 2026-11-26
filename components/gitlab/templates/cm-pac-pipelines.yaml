@@ -1,6 +1,23 @@
 {{- $host := include "gitlab.host" . }}
 {{- $subdomain := required "Set cluster.subdomain" .Values.cluster.subdomain }}
 {{- $quay := printf "quay.%s" $subdomain }}
+{{- /* Application repo name -> its gitops repo routing. Derived from the
+       gitops entries' rewriteImageRepository blocks (the single place the
+       component<->gitops-repo<->chart-path mapping already lives), so the
+       .tekton/ definitions can tell ci-build-publish WHERE to promote.
+       Without these params every application's CI promotes into the FIRST
+       application's gitops repo (gitops-cd-dev's defaults): on cluster-dl265
+       a lightwell build wrote its tag into spring-boot's dev values. */}}
+{{- $gitopsByComponent := dict }}
+{{- range $group := .Values.gitlab.groups }}
+{{- range $repo := $group.repo }}
+{{- if and $repo.rewriteImageRepository ($repo.rewriteImageRepository.enabled | default false) }}
+{{- $secret := "scm-auth-gitops-secret" }}
+{{- if $repo.accessToken }}{{ $secret = $repo.accessToken.secretName | default "scm-auth-gitops-secret" }}{{ end }}
+{{- $_ := set $gitopsByComponent $repo.rewriteImageRepository.component (dict "group" $group.name "repo" $repo.name "chartPath" (dir $repo.rewriteImageRepository.file) "secret" $secret) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if and (.Values.pac.enabled | default false) .Values.pipeline.namespace }}
 # -----------------------------------------------------------------------------
 # The .tekton/ PipelineRun definitions, as ConfigMap data keys, rendered
@@ -102,6 +119,34 @@ data:
           value: "{{ "{{" }} revision {{ "}}" }}"
         - name: output-image
           value: "{{ $quay }}/tssc/{{ $repo.name }}:{{ "{{" }} revision {{ "}}" }}"
+{{- $gi := index $gitopsByComponent $repo.name }}
+{{- if $gi }}
+        # Per-application promotion routing for the finally task's
+        # gitops-cd-dev run: WHICH gitops repo, WHICH dev values file, and
+        # WHICH gitops project-bot secret. Without them the run uses
+        # gitops-cd-dev's spring-boot defaults and cross-promotes.
+        - name: gitops-url
+          value: "https://{{ $host }}/{{ $gi.group }}/{{ $gi.repo }}"
+        - name: git-host
+          value: {{ $host | quote }}
+        - name: values-path
+          value: "{{ $gi.chartPath }}/environments/dev/values.yaml"
+        - name: scm-gitops-secret-name
+          value: {{ $gi.secret | quote }}
+{{- end }}
+        # The first CI run on a fresh cluster is fired by the seeding
+        # job's .tekton commit (wave 8) and can beat the wave-10 Quay
+        # configuration to its image push; the run waits for the push
+        # credential itself (wait-for-registry). Later runs find it
+        # immediately -- and the wait task is skipped entirely when this
+        # is "0".
+        - name: registry-wait-timeout
+          value: "30m"
+        # ... and the same for RHTPA (wave 10): the first CI run must not
+        # upload its SBOM against an RHTPA that is still starting. The
+        # wait runs concurrently with the build, so it costs no time.
+        - name: trustification-wait-timeout
+          value: "30m"
       workspaces:
         - name: workspace
           volumeClaimTemplate:

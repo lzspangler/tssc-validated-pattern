@@ -1,0 +1,164 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: wait-for-ci-build
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.41.0"
+    tekton.dev/tags: "tekton, pipelinerun"
+spec:
+  description: >-
+    Wait for a Succeeded run of a pipeline (by default ci-build-publish) that
+    was started for a given application repository, and export the image that
+    run published. The demo's install-time smoke (demo-smoke) uses this to
+    chain onto the CI run Pipelines-as-Code triggers from the seeding job's
+    .tekton commit -- rather than building a second time -- before promoting
+    the image through the environments.
+
+    Runs are matched by the pipeline-name label Tekton puts on every
+    PipelineRun plus the run's git-url param compared against APP_REPO_URL
+    with any trailing ".git" stripped (PaC renders repo_url without the
+    suffix; the Repository CR must not carry it either, but a hand-started
+    run might). Fails with a summary of the runs it saw when TIMEOUT
+    elapses, so a PaC that never fired is diagnosed rather than silently
+    worked around: CI is core to this demo, and a missing CI run means
+    something upstream is broken.
+
+    Like start-gitops-cd-dev, this talks to the Kubernetes API directly with
+    the pod's own service account token (kubectl/tkn do not pick up in-cluster
+    credentials on their own).
+  params:
+    - name: APP_REPO_URL
+      type: string
+      description: Application repository URL the waited-for run was started for.
+    - name: PIPELINE
+      type: string
+      description: Pipeline whose runs to wait for.
+      default: ci-build-publish
+    - name: NAMESPACE
+      type: string
+      description: Namespace the runs live in.
+      default: tssc-app-ci
+    - name: TIMEOUT
+      type: string
+      description: >-
+        How long to wait, e.g. 90m or 5400s (a bare number means minutes).
+        Must fit inside the PipelineRun's own pipeline timeout.
+      default: 90m
+    - name: POLL_INTERVAL
+      type: string
+      description: Seconds between polls.
+      default: "30"
+    - name: GIT_IMAGE
+      type: string
+      description: >-
+        Image this task runs in. It MUST contain curl AND jq (the run list is
+        filtered with jq). The pipeline overrides this with the agent image,
+        which bundles both.
+      default: quay.io/sscdemo/ai-agent-maven-aider:v1.0.1
+  results:
+    - name: IMAGE
+      description: The output-image the matched run published.
+    - name: PIPELINERUN
+      description: Name of the matched PipelineRun.
+  steps:
+    - name: wait-for-build
+      image: $(params.GIT_IMAGE)
+      env:
+        - name: HOME
+          value: /tekton/home
+        - name: PARAM_APP_REPO_URL
+          value: $(params.APP_REPO_URL)
+        - name: PARAM_PIPELINE
+          value: $(params.PIPELINE)
+        - name: PARAM_NAMESPACE
+          value: $(params.NAMESPACE)
+        - name: PARAM_TIMEOUT
+          value: $(params.TIMEOUT)
+        - name: PARAM_POLL_INTERVAL
+          value: $(params.POLL_INTERVAL)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SA_DIR="/var/run/secrets/kubernetes.io/serviceaccount"
+        TOKEN="$(cat "${SA_DIR}/token")"
+        API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS}"
+
+        # TIMEOUT formats: "90m", "5400s", bare number = minutes.
+        case "${PARAM_TIMEOUT}" in
+          *m) TIMEOUT_SECONDS=$(( ${PARAM_TIMEOUT%m} * 60 )) ;;
+          *s) TIMEOUT_SECONDS=${PARAM_TIMEOUT%s} ;;
+          *)  TIMEOUT_SECONDS=$(( PARAM_TIMEOUT * 60 )) ;;
+        esac
+
+        # PaC renders repo_url without a trailing .git; normalize both sides
+        # so hand-started runs (which may carry .git) still match.
+        WANT_URL="${PARAM_APP_REPO_URL%.git}"
+
+        list_runs() {
+          # Buffer the body and print it ONLY when curl succeeds. A
+          # transport failure can occur mid-body, leaving PARTIAL output
+          # ("{"items":[") already written; piping that into jq fails the
+          # parse, pipefail propagates it, and set -e would end the wait
+          # window -- exactly what this wait must never do. On failure
+          # print nothing: jq reads empty input, emits nothing, and the
+          # loop polls again.
+          local body
+          if body="$(curl -sS --cacert "${SA_DIR}/ca.crt" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "${API}/apis/tekton.dev/v1/namespaces/${PARAM_NAMESPACE}/pipelineruns?labelSelector=tekton.dev%2Fpipeline%3D${PARAM_PIPELINE}")"; then
+            printf '%s' "${body}"
+          fi
+        }
+
+        # Summarize every run of this pipeline for THIS repo: name, status,
+        # image. Used for both matching and the timeout error message.
+        #
+        # Completion is matched on conditions[0].status == "True", NOT on the
+        # reason: OpenShift Pipelines reports reason "Succeeded" for a plain
+        # pipeline but "Completed" for one with finally tasks (ci-build-publish
+        # has finally tasks), and matching on reason would hang forever.
+        runs_for_repo() {
+          list_runs | jq -r --arg want "${WANT_URL}" '
+            .items // []
+            | map(select(
+                ([.spec.params[]? | select(.name == "git-url") | .value][0] // ""
+                | sub("\\.git$"; "")) == $want))
+            | sort_by(.metadata.creationTimestamp) | reverse
+            | .[] |
+                "\(.metadata.name) \(.status.conditions[0].status // "Running") \(([.spec.params[]? | select(.name == "output-image") | .value][0]) // "-")"'
+        }
+
+        echo "Waiting up to ${PARAM_TIMEOUT} for a Succeeded ${PARAM_PIPELINE} run of ${WANT_URL}"
+
+        DEADLINE=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while :; do
+          MATCH="$(runs_for_repo | awk '$2 == "True" { print; exit }')"
+          if [ -n "${MATCH}" ]; then
+            NAME="$(printf '%s' "${MATCH}" | cut -d' ' -f1)"
+            IMAGE="$(printf '%s' "${MATCH}" | cut -d' ' -f3)"
+            echo "Matched PipelineRun ${NAME} (image ${IMAGE})"
+            printf '%s' "${IMAGE}" > "$(results.IMAGE.path)"
+            printf '%s' "${NAME}" > "$(results.PIPELINERUN.path)"
+            exit 0
+          fi
+
+          if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+            echo "ERROR: no Succeeded ${PARAM_PIPELINE} run for ${WANT_URL} within ${PARAM_TIMEOUT}." >&2
+            echo "Runs seen (newest first; name status image):" >&2
+            runs_for_repo >&2 || true
+            echo "If the list is empty, Pipelines-as-Code never started CI for the repository --" >&2
+            echo "check the Repository CR, the webhooks and the .tekton/ definitions." >&2
+            exit 1
+          fi
+
+          sleep "${PARAM_POLL_INTERVAL}"
+        done
+---
+# The RBAC this task needs: it LISTs PipelineRuns in the pipeline namespace as
+# its pod's service account (the `pipeline` SA). The create/get verbs live on
+# the pipeline-pipelinerun-starter Role in start-gitops-cd-dev.yaml (the
+# finally task that POSTs gitops-cd-dev runs); "list" is added there rather
+# than duplicated here so one Role owns the pipeline SA's PipelineRun access.

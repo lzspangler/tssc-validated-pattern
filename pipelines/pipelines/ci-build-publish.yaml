@@ -119,6 +119,16 @@ spec:
     - name: trustification-secret-name
       type: string
       default: tpa-secret
+    - name: trustification-wait-timeout
+      type: string
+      description: >-
+        How long the run waits for RHTPA to accept uploads before the SBOM
+        upload (the wait runs concurrently with the build, so it costs no
+        wall-clock time). "0" skips the wait. Install-time runs (the
+        .tekton definitions committed at install) pass e.g. 30m so the
+        first CI run does not upload against an RHTPA that is still
+        starting at wave 10.
+      default: "0"
     - name: fail-if-trustification-not-configured
       type: string
       description: >-
@@ -163,6 +173,40 @@ spec:
         bumping image.tag in the gitops repo's dev values file). Set "false" to
         build and publish without promoting to dev.
       default: "true"
+    # Where the finally task's gitops-cd-dev run promotes to. The defaults
+    # serve the spring-boot example on the reference cluster; the per-repo
+    # .tekton/ definitions (components/gitlab cm-pac-pipelines) pass these
+    # explicitly per application. WITHOUT them every application's CI
+    # promotes into the FIRST application's gitops repo -- on cluster-dl265
+    # a lightwell build wrote its tag into spring-boot's dev values.
+    # gitops-url / git-host are rewritten on cluster moves by the
+    # tekton-cluster-defaults Job (components/pipelines), same as on
+    # gitops-cd-{dev,qa,prod}.
+    - name: gitops-url
+      type: string
+      description: GitLab URL of the gitops repository to promote into.
+      default: https://gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io/development/spring-boot-example-gitops
+    - name: git-host
+      type: string
+      description: Host of the SCM serving the gitops repository.
+      default: gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io
+    - name: values-path
+      type: string
+      description: Values file inside the gitops repo whose image.tag is bumped.
+      default: app/spring-boot-example/environments/dev/values.yaml
+    - name: scm-gitops-secret-name
+      type: string
+      description: Secret holding the gitops repository's own project access token.
+      default: scm-auth-gitops-secret
+    - name: registry-wait-timeout
+      type: string
+      description: >-
+        How long the run waits for the Quay push credential (quay-push
+        Secret + its ServiceAccount link) before building. "0" skips the
+        wait; install-time runs (the .tekton definitions committed at
+        install) pass e.g. 30m so the first CI run on a fresh cluster does
+        not fail its image push against a Quay that is still configuring.
+      default: "0"
   results:
     - name: IMAGE_URL
       value: $(tasks.build-container.results.IMAGE_URL)
@@ -173,7 +217,27 @@ spec:
     - name: CHAINS-GIT_COMMIT
       value: $(tasks.clone-repository.results.commit)
   tasks:
+    # The install-time PipelineRuns-as-Code runs (fired by the seeding
+    # job's .tekton commit at wave 8) race the wave-10 Quay configuration:
+    # a build-container push that beats Quay fails the run. The run itself
+    # absorbs the skew -- the seeding job cannot wait for a wave-10
+    # resource (its completion is what unblocks the later waves). Inactive
+    # ("0") by default: the when-expression skips the task entirely, and
+    # clone still runs -- a skipped task counts as executed for runAfter.
+    - name: wait-for-registry
+      taskRef:
+        kind: Task
+        name: wait-for-registry
+      when:
+        - input: "$(params.registry-wait-timeout)"
+          operator: notin
+          values: ["0", ""]
+      params:
+        - name: TIMEOUT
+          value: $(params.registry-wait-timeout)
     - name: clone-repository
+      runAfter:
+        - wait-for-registry
       params:
         - name: url
           value: $(params.git-url)
@@ -277,6 +341,28 @@ spec:
         - name: source
           workspace: workspace
 
+    # Install-time runs race RHTPA's wave-10 startup exactly like Quay's;
+    # this wait runs CONCURRENTLY with clone/package/build (no runAfter),
+    # so it costs no wall-clock time -- it only holds the upload back
+    # until RHTPA actually accepts it. Skipped entirely ("0") for manual
+    # runs and when the SBOM upload itself is off; a skipped task still
+    # satisfies runAfter dependents.
+    - name: wait-for-trustification
+      taskRef:
+        kind: Task
+        name: wait-for-trustification
+      when:
+        - input: "$(params.upload-sbom)"
+          operator: in
+          values: ["true"]
+        - input: "$(params.trustification-wait-timeout)"
+          operator: notin
+          values: ["0", ""]
+      params:
+        - name: TRUSTIFICATION_SECRET_NAME
+          value: $(params.trustification-secret-name)
+        - name: TIMEOUT
+          value: $(params.trustification-wait-timeout)
     # Publish the SBOM to RHTPA so the agentic pipelines -- and anyone asking
     # "what is in the image we shipped?" -- have something to analyze.
     - name: upload-sbom-to-rhtpa
@@ -291,6 +377,7 @@ spec:
           value: $(params.fail-if-trustification-not-configured)
       runAfter:
         - build-container
+        - wait-for-trustification
       taskRef:
         kind: Task
         name: upload-sbom-to-rhtpa
@@ -346,6 +433,16 @@ spec:
           value: $(params.git-url)
         - name: APP_COMMIT
           value: $(tasks.clone-repository.results.commit)
+        # Per-application promotion routing; see the params above for why
+        # these cannot be left to gitops-cd-dev's defaults.
+        - name: GITOPS_URL
+          value: $(params.gitops-url)
+        - name: GIT_HOST
+          value: $(params.git-host)
+        - name: VALUES_PATH
+          value: $(params.values-path)
+        - name: SCM_SECRET_NAME
+          value: $(params.scm-gitops-secret-name)
       taskRef:
         kind: Task
         name: start-gitops-cd-dev

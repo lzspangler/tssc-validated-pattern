@@ -273,8 +273,12 @@ tls:
 # a pac-less install renders no ConfigMap either). `issueCommands` gates the
 # seeding job's EventListener half (gitlab-webhook-secret + the Note Hook
 # webhook): without Tekton there is no Route to point at, and an ungated
-# wait would abort the whole seeding. Bootstrap sets it from
-# components.tekton.enabled.
+# wait would abort the whole seeding. `pipelineRuns` gates the install-time
+# demo-smoke and cve-analysis runs the seeding job creates (and their
+# Pipeline waits) for the same reason: without Tekton those Pipelines are
+# never installed, and the waits would abort the seeding. Bootstrap sets
+# both from components.tekton.enabled.
 pac:
   enabled: true
+  pipelineRuns: true
   issueCommands: true

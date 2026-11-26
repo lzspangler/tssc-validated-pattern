@@ -38,14 +38,19 @@ data:
             data=json.dumps(body).encode() if body is not None else None,
             headers={"Authorization": "Bearer " + token, "Accept": "application/json",
                      **({"Content-Type": ctype} if body is not None else {})})
-        # urllib raises HTTPError for 4xx/5xx instead of returning the code;
-        # the create-or-update flow below depends on seeing 404 from the PUT.
+        # HTTPError must be CAUGHT and returned as (code, body): urlopen
+        # raises on every 4xx/5xx, so without this a 404 from the PUT
+        # below crashes the script and the "POST to create" fallback is
+        # dead code -- the first run on a fresh cluster (maven-settings
+        # not yet existing) crash-looped the Job exactly that way
+        # (cluster-hnjcl, 8/20 backoff attempts burned).
         try:
             with urllib.request.urlopen(req, context=ctx) as r:
                 raw = r.read()
                 return r.status, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()[:300]
+            raw = e.read()
+            return e.code, (json.loads(raw) if raw else None)
 
     # Read the admin password (bootstrap.creds format: admin@*=<password>).
     code, secret = call("/api/v1/namespaces/%s/secrets/artifactory-admin" % NS)

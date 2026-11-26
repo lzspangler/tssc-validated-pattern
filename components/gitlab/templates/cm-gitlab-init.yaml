@@ -359,14 +359,21 @@ data:
             body_format: form-urlencoded
             body:
               branch: {{ $branch }}
-              # NOTE: the pattern is deliberately BACKSLASH-FREE. The
-              # double-escaped \\s / \\1 that used to be here survived
-              # Helm and YAML differently than expected inside Ansible's
-              # Jinja: the PUT fired but committed identical content (an
-              # empty commit), leaving the imported chart pointed at the
-              # authoring cluster's Quay. [[:space:]] and a literal
-              # replacement avoid the whole escaping question.
-              content: '{{ "{{" }} r_chart_values.json.content | b64decode | regex_replace("(?m)^[[:space:]]*repository:.*$", "  repository: {{ $targetRepo }}") {{ "}}" }}'
+              # NOTE: the pattern MUST use \s, NOT a POSIX class. Ansible's
+              # regex_replace runs Python re, which has no [[:space:]]: it
+              # parses that as the character set {:,s,p,a,c,e}, so
+              # ^[[:space:]]*repository: can never match an indented
+              # "  repository:" line. The task's when-guard then sees "no
+              # change", skips the PUT, and the imported chart quietly
+              # stays pointed at the authoring cluster's dead Quay (that
+              # is exactly what happened to lightwell-java-demo-app-gitops
+              # on cluster-dl265; spring-boot survived only via a manual
+              # retarget commit). A single backslash is correct here: this
+              # is a YAML single-quoted scalar inside a Helm template, and
+              # neither layer touches backslashes -- the double-escaped
+              # \\s that used to be here over-escaped and produced empty
+              # commits.
+              content: '{{ "{{" }} r_chart_values.json.content | b64decode | regex_replace("(?m)^\s*repository:.*$", "  repository: {{ $targetRepo }}") {{ "}}" }}'
               commit_message: "Point image.repository at this cluster's Quay"
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
@@ -377,7 +384,7 @@ data:
           # no repository line at all (nothing this task should touch).
           when: >-
             r_chart_values.json.content | b64decode
-            | regex_replace("(?m)^[[:space:]]*repository:.*$", "  repository: {{ $targetRepo }}")
+            | regex_replace("(?m)^\s*repository:.*$", "  repository: {{ $targetRepo }}")
             != r_chart_values.json.content | b64decode
 {{- end }}
 
@@ -877,6 +884,48 @@ data:
             validate_certs: false
             status_code:
               - 200
+
+        # ---- initial CI trigger ----------------------------------------------
+        # The .tekton definitions above were committed BEFORE the webhooks
+        # existed (and before the Repository CR did), so their push events
+        # were LOST: on a fresh install PaC never fires the first CI run,
+        # and demo-smoke's wait-for-ci-build times out with nothing to
+        # chain onto (exactly what happened on cluster-hnjcl -- zero
+        # ci-build-publish runs after a fully green install). Now that
+        # BOTH webhooks are registered, create a marker file in the repo:
+        # its push event is what actually starts the first CI run.
+        # Create-only, like populate: a re-seed does not re-trigger.
+        # NOT under .tekton/ -- PaC parses every file there and a non-YAML
+        # marker would abort the whole event.
+        - name: Check for the CI trigger marker on {{ $repo.name }}
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/.ci-trigger?ref={{ $branch }}
+            method: GET
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
+              - 404
+          register: r_ci_trigger
+
+        - name: Trigger the initial CI run for {{ $repo.name }}
+          when: r_ci_trigger.status == 404
+          ansible.builtin.uri:
+            url: https://{{ $host }}/api/v4/projects/{{ "{{" }} project_id {{ "}}" }}/repository/files/.ci-trigger
+            method: POST
+            body_format: form-urlencoded
+            body:
+              branch: {{ $branch }}
+              encoding: base64
+              # "initial CI trigger\n"
+              content: aW5pdGlhbCBISSB0cmlnZ2VyCg==
+              commit_message: Trigger the initial CI run
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 201
 {{- end }}
 {{- end }}
 
@@ -1082,5 +1131,283 @@ data:
           delay: 5
           until: r_group_user.status in [201, 409] or r_group_user is skipped
           loop: '{{ "{{" }} r_users.json {{ "}}" }}'
+{{- end }}
+{{- end }}
+
+{{- /* pipelineRuns defaults to TRUE when unset -- but `| default true`
+       cannot express that, because the default filter fires on ANY falsy
+       value, including an explicit false (false | default true == true!).
+       hasKey distinguishes "not configured" from "configured false". */}}
+{{- $pipelineRuns := true }}
+{{- if hasKey .Values.pac "pipelineRuns" }}{{ $pipelineRuns = .Values.pac.pipelineRuns }}{{ end }}
+{{- if and .Values.pac.enabled $pipelineRuns $pipelineNs }}
+
+{{- range $group := .Values.gitlab.groups }}
+{{- range $repo := $group.repo }}
+{{- if and $repo.rewriteImageRepository ($repo.rewriteImageRepository.enabled | default false) }}
+{{- $rewrite := $repo.rewriteImageRepository }}
+{{- $secret := "scm-auth-gitops-secret" }}
+{{- if $repo.accessToken }}{{ $secret = $repo.accessToken.secretName | default "scm-auth-gitops-secret" }}{{ end }}
+{{- $chartPath := dir $rewrite.file }}
+
+        # =================================================================
+        # Install-time smoke for {{ $rewrite.component }}: build once and
+        # promote through dev/qa/prod, so every environment Application
+        # lands Healthy. They start Degraded by design -- Argo creates each
+        # Deployment while image.tag is still the initial "latest", a tag
+        # nothing ever pushes -- and without this the board stays red until
+        # someone runs the promotions by hand (see
+        # pipelines/pipelines/demo-smoke.yaml for the full story).
+        #
+        # Everything below is derived from the gitops entry's
+        # rewriteImageRepository block -- the single place the
+        # component / gitops-repo / chart-path mapping lives: the app repo
+        # is <group>/<rewrite.component>, the chart lives under
+        # {{ $chartPath }}, and the gitops bot secret is {{ $secret }}.
+        # =================================================================
+
+        - name: Wait for the demo-smoke Pipeline to be installed
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: Pipeline
+            namespace: {{ $pipelineNs }}
+            name: demo-smoke
+          register: r_smoke_pipeline
+          # The Pipeline is synced by the tekton-pipelines Application
+          # (root-app waves 3-5); this job can start first, so retry until
+          # it lands rather than assuming ordering.
+          #
+          # The until MUST guard on failure first: a failed lookup (a 403
+          # from missing RBAC, an API hiccup) returns a dict with NO
+          # "resources" key, and reading .resources on it crashes the
+          # conditional evaluation itself -- the task dies on attempt one
+          # instead of retrying, which is exactly how this play first
+          # failed (the SA held pipelineruns rights but not pipelines).
+          # The `is not failed` guard short-circuits the `and`, so a
+          # failed attempt retries instead of aborting.
+          until: r_smoke_pipeline is not failed and (r_smoke_pipeline.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Check for an existing demo-smoke run for {{ $rewrite.component }}
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: PipelineRun
+            namespace: {{ $pipelineNs }}
+            name: demo-smoke-{{ $rewrite.component }}
+          register: r_smoke_run
+
+        # Create-only, on purpose. Tekton's validating webhook rejects ANY
+        # spec update to a completed PipelineRun ("Once the PipelineRun is
+        # complete, no updates are allowed"), and the creation-time
+        # defaulting webhook adds fields the rendered manifest lacks -- so a
+        # converge-style patch on an existing run ALWAYS fires and is ALWAYS
+        # rejected, failing the whole seeding on re-seed. Looking first and
+        # skipping when present is what actually implements the fixed-name
+        # policy; delete the PipelineRun (and re-sync) to run the smoke
+        # again.
+        - name: Start the demo-smoke PipelineRun for {{ $rewrite.component }}
+          when: (r_smoke_run.resources | default([]) | length) == 0
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                # Fixed name; the create-only guard above makes a re-seed
+                # leave the existing run alone. Delete the PipelineRun
+                # first (and re-sync) to run the smoke again.
+                name: demo-smoke-{{ $rewrite.component }}
+                namespace: {{ $pipelineNs }}
+                labels:
+                  app.kubernetes.io/part-of: tssc-validated-pattern
+                  tekton.dev/pipeline: demo-smoke
+              spec:
+                pipelineRef:
+                  name: demo-smoke
+                taskRunTemplate:
+                  serviceAccountName: pipeline
+                # 2h covers the 90m CI wait plus the three promotions.
+                timeouts:
+                  pipeline: 2h0m0s
+                params:
+                  - name: app-repo-url
+                    value: https://{{ $host }}/{{ $group.name }}/{{ $rewrite.component }}
+                  - name: gitops-url
+                    value: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}
+                  - name: git-host
+                    value: {{ $host }}
+                  # The gitops repo's own default branch: hard-coding main
+                  # would break promotion MRs for a repo configured with a
+                  # different defaultBranch.
+                  - name: base-branch
+                    value: {{ $repo.defaultBranch | default "main" }}
+                  - name: dev-values-path
+                    value: {{ $chartPath }}/environments/dev/values.yaml
+                  - name: qa-values-path
+                    value: {{ $chartPath }}/environments/qa/values.yaml
+                  - name: prod-values-path
+                    value: {{ $chartPath }}/environments/prod/values.yaml
+                  - name: scm-secret-name
+                    value: {{ $secret }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- $quay := printf "quay.%s" (required "Set cluster.subdomain" .Values.cluster.subdomain) }}
+
+        # =================================================================
+        # Agentic CVE analysis for every example application: the same run
+        # an operator starts by hand (tkn pipeline start agentic-cve-analysis
+        # ...), started once at install time so the demo opens with CVE
+        # issues already filed on the boards. It builds its own :analysis
+        # image and is independent of the smoke above.
+        #
+        # The WAITS below are not optional: a PipelineRun whose secret-backed
+        # workspace (maven-settings / git-auth) binds a missing Secret hangs
+        # its pod in PodInitializing FOREVER rather than failing, burning the
+        # whole 3h pipeline timeout. maven-settings is written by the
+        # Artifactory component's post-install Job -- the slowest thing on a
+        # fresh cluster -- so it gets twice the retry budget of the rest.
+        # =================================================================
+
+        - name: Wait for the agentic-cve-analysis Pipeline to be installed
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: Pipeline
+            namespace: {{ $pipelineNs }}
+            name: agentic-cve-analysis
+          register: r_analysis_pipeline
+          until: r_analysis_pipeline is not failed and (r_analysis_pipeline.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Wait for the tpa-secret Secret (RHTPA upload credentials)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            namespace: {{ $pipelineNs }}
+            name: tpa-secret
+          register: r_tpa_secret
+          until: r_tpa_secret is not failed and (r_tpa_secret.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Wait for the ai-agent-secret Secret (the CVE analyzer's API key)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            namespace: {{ $pipelineNs }}
+            name: ai-agent-secret
+          register: r_ai_secret
+          until: r_ai_secret is not failed and (r_ai_secret.resources | default([]) | length > 0)
+          retries: 90
+          delay: 10
+
+        - name: Wait for the maven-settings Secret (Artifactory-backed resolution)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            namespace: {{ $pipelineNs }}
+            name: maven-settings
+          register: r_maven_settings
+          until: r_maven_settings is not failed and (r_maven_settings.resources | default([]) | length > 0)
+          retries: 180
+          delay: 10
+
+{{- range $group := .Values.gitlab.groups }}
+{{- range $repo := $group.repo }}
+{{- if (index $repo "pac" | default dict).enabled }}
+{{- $scm := "scm-auth-secret" }}
+{{- if $repo.accessToken }}{{ $scm = $repo.accessToken.secretName | default "scm-auth-secret" }}{{ end }}
+
+        - name: Check for an existing cve-analysis run for {{ $repo.name }}
+          kubernetes.core.k8s_info:
+            api_version: tekton.dev/v1
+            kind: PipelineRun
+            namespace: {{ $pipelineNs }}
+            name: cve-analysis-{{ $repo.name }}
+          register: r_analysis_run
+
+        # Create-only, for the same reason as the smoke runs above: a
+        # completed PipelineRun rejects every spec update, and the
+        # defaulting webhook guarantees the rendered manifest never
+        # matches the live object -- so converge-patching an existing run
+        # fails the whole seeding. Delete the PipelineRun (and re-sync)
+        # to analyze again.
+        - name: Start the agentic-cve-analysis PipelineRun for {{ $repo.name }}
+          when: (r_analysis_run.resources | default([]) | length) == 0
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: tekton.dev/v1
+              kind: PipelineRun
+              metadata:
+                name: cve-analysis-{{ $repo.name }}
+                namespace: {{ $pipelineNs }}
+                labels:
+                  app.kubernetes.io/part-of: tssc-validated-pattern
+                  tekton.dev/pipeline: agentic-cve-analysis
+              spec:
+                pipelineRef:
+                  name: agentic-cve-analysis
+                taskRunTemplate:
+                  serviceAccountName: pipeline
+                # The pipeline is ~40 min of RHTPA tasks plus 45-90 min of
+                # model-gated analysis; the console's implicit 1h would kill
+                # it, so this pins the same 3h the tkn invocation uses.
+                timeouts:
+                  pipeline: 3h0m0s
+                params:
+                  - name: component-name
+                    value: {{ $repo.name }}
+                  - name: git-url
+                    value: https://{{ $host }}/{{ $group.name }}/{{ $repo.name }}.git
+                  # The repo's configured default branch: hard-coding main
+                  # would fail the clone for a repo whose defaultBranch is
+                  # something else (populate commits defaultBranch, this run
+                  # must check it out).
+                  - name: revision
+                    value: {{ $repo.defaultBranch | default "main" }}
+                  - name: output-image
+                    value: {{ $quay }}/tssc/{{ $repo.name }}:analysis
+                  # The run starts while the wave-10 Quay component may
+                  # still be configuring; the run waits for the push
+                  # credential itself (see wait-for-registry -- the seeding
+                  # job cannot, without deadlocking the later waves).
+                  - name: registry-wait-timeout
+                    value: 30m
+                  # RHTPA is also wave 10, and the tpa-secret wait above
+                  # only proves the SECRET exists (ESO reads Vault,
+                  # independent of the RHTPA server) -- not that RHTPA
+                  # accepts uploads. The run waits for that itself,
+                  # concurrently with its build (wait-for-trustification).
+                  - name: trustification-wait-timeout
+                    value: 30m
+                  - name: git-host
+                    value: {{ $host }}
+                  - name: scm-provider
+                    value: gitlab
+                  - name: scm-secret-name
+                    value: {{ $scm }}
+                workspaces:
+                  - name: workspace
+                    volumeClaimTemplate:
+                      spec:
+                        accessModes: [ReadWriteOnce]
+                        resources:
+                          requests:
+                            storage: 5Gi
+                  - name: maven-settings
+                    secret:
+                      secretName: maven-settings
+                  # The repo's OWN project-bot token (a project bot is a
+                  # member of exactly one project) -- this is also the
+                  # secret open-cve-issues pushes issues with.
+                  - name: git-auth
+                    secret:
+                      secretName: {{ $scm }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

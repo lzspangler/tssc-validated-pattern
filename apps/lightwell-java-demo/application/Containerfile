@@ -1,13 +1,76 @@
-FROM registry.access.redhat.com/ubi9/openjdk-17:1.24-3.1794341130 AS builder
-USER 0
-WORKDIR /build
-COPY .mvn ./.mvn
-COPY pom.xml .
-COPY src ./src
-RUN mvn -B clean package -DskipTests
+# syntax=docker/dockerfile:1.4
 
-FROM registry.access.redhat.com/ubi9/openjdk-17-runtime:1.24-3.1794341131
+# NOTE on the base image tags: use the SHORT release tags (1.24), never the
+# datestamped forms (1.24-3.1794341130). Red Hat publishes GPG signatures
+# for the short tags only, and the ubi9/buildah image verifies them per
+# RHEL's default policy -- a datestamped tag fails the pull on a fresh
+# cluster with "None of the signatures were accepted" (cluster-2v924,
+# both lightwell build runs). Same pattern the spring-boot Containerfile
+# already uses.
+
+# ---- Build stage ----
+FROM registry.access.redhat.com/ubi9/openjdk-17:1.24 AS builder
+
+USER 0
+
+WORKDIR /build
+
+# Copy Maven project files first so dependency resolution can be cached
+COPY pom.xml .
+
+# Copy source and other build inputs
+COPY src/ src/
+
+# Build the executable Spring Boot JAR.
+#
+# Same pattern as apps/spring-boot-example/application/Containerfile: the
+# project-local .mvn/ settings were removed (this demo resolves through the
+# in-cluster Artifactory, which mirrors the Lightwell repos), so resolve
+# through the settings.xml the CI pipeline leaves in the build context
+# instead of going straight to Maven Central.
+#
+# Why this is needed: ci-build-publish compiles this source once with the
+# Tekton `maven` task, which resolves through the Artifactory virtual repo,
+# and then hands the same workspace to buildah -- which compiles it a SECOND
+# time, here. A bare `mvn clean package` only knows about Central, so the
+# moment the remediation pins a Lightwell backport (6.0.3.rhlw-00001 and
+# friends, which exist only in Artifactory/Lightwell) the pipeline passes
+# its `package` task and then fails in this stage on a missing artifact.
+#
+# Bind-mounted rather than COPYed, for two reasons:
+#   * that settings.xml carries the Artifactory credential, and a mount
+#     leaves no layer holding it -- not even in this discarded build stage;
+#   * mounting the context root means there is no COPY of an optional file
+#     to go wrong when it is absent.
+#
+# The path is where the `maven` task's maven-generate step writes it:
+# <workspace>/<subdirectory>/maven-generate/settings.xml. buildah-rhtap
+# builds with a context of <workspace>/source, which it HARDCODES rather
+# than reading the pipeline's `subdirectory` param -- so the two line up
+# only while that param keeps its default of `source`.
+#
+# When the file is absent -- a plain `podman build` of a fresh clone -- the
+# fallback resolves from Maven Central, which works for the intentionally
+# vulnerable upstream pins this demo starts from.
+#
+# -DskipTests stays: the pipeline's `package` task already ran them, and a
+# second run here would only slow the build down. The CycloneDX plugin is
+# bound to `package`, so target/bom.json is still produced.
+RUN --mount=type=bind,target=/ctx \
+    if [ -f /ctx/maven-generate/settings.xml ]; then \
+      echo "Resolving through settings.xml from the build context"; \
+      mvn -B -s /ctx/maven-generate/settings.xml clean package -DskipTests; \
+    else \
+      echo "No settings.xml in the build context; resolving from Maven Central"; \
+      mvn -B clean package -DskipTests; \
+    fi
+
+# ---- Runtime stage ----
+FROM registry.access.redhat.com/ubi9/openjdk-17-runtime:1.24
+
 COPY --from=builder /build/target/help-im-vulnerable-*.jar /deployments/app.jar
 COPY --from=builder /build/target/bom.json /deployments/maven-sbom.json
+
 EXPOSE 8080
+
 ENTRYPOINT ["java", "-jar", "/deployments/app.jar"]
