@@ -35,7 +35,6 @@ done
 
 : "${KIND_NODE_IMAGE:?KIND_NODE_IMAGE must be set by the Makefile or environment}"
 : "${TEKTON_PIPELINES_VERSION:?TEKTON_PIPELINES_VERSION must be set by the Makefile or environment}"
-: "${INTEGRATION_NAMESPACE:?INTEGRATION_NAMESPACE must be set by the Makefile or environment}"
 context="kind-${KIND_CLUSTER_NAME}"
 
 original_context="$(kubectl config current-context 2>/dev/null || true)"
@@ -92,15 +91,9 @@ for deployment in tekton-pipelines-controller tekton-pipelines-webhook; do
     "deployment/$deployment"
 done
 
-kubectl --context "$context" create namespace "$INTEGRATION_NAMESPACE" \
-  --dry-run=client \
-  --output=yaml \
-  | kubectl --context "$context" apply --filename -
-
 printf '\nKind integration-test bootstrap is ready.\n'
 printf '  cluster:   %s\n' "$KIND_CLUSTER_NAME"
 printf '  context:   %s\n' "$context"
-printf '  namespace: %s\n' "$INTEGRATION_NAMESPACE"
 printf '  node image: %s\n' "$KIND_NODE_IMAGE"
 printf '  Tekton:    %s\n' "$TEKTON_PIPELINES_VERSION"
 printf 'The bootstrap does not change the active kubectl context.\n'

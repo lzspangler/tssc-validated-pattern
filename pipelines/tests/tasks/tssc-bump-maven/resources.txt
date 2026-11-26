@@ -1,0 +1,1 @@
+pipelines/tasks/tssc-bump-maven.yaml
