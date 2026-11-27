@@ -27,16 +27,50 @@ runs it once GitLab is up. In order:
    `open-cve-issues` files land on a readable board instead of auto-creating
    grey labels.
 7. Commits the `.tekton/` Pipelines-as-Code definitions into the
-   application repository and creates the PaC `Repository` CR — PaC creates
-   the GitLab webhooks itself. (Previously:
-   `/remediate` issue comment into a PipelineRun — subscribed to `note_events`
-   and nothing else. `push_events` defaults to true on a new hook and has to
-   be switched off explicitly, or every push also fires the remediation
-   trigger.
-8. Mints a **project** access token and writes it into the pipeline namespace
-   as `scm-auth-secret`.
+   application repository and creates the PaC `Repository` CR — then
+   registers **both** GitLab webhooks itself (PaC does not reliably create
+   its own on this GitLab version):
+   * the **PaC webhook** (push + merge-request + note events) against the
+     PaC controller Route, carrying the `gitlab-pac-webhook` token;
+   * the **issue-comment webhook** (Note Hooks only — `push_events` and
+     `merge_requests_events` are set false explicitly on every create and
+     update, so no push or MR event ever reaches the EventListener)
+     against the `agentic-issue-commands` EventListener Route
+     (`pipelines/triggers/`), carrying the `gitlab-webhook-secret` token.
+     This is the only path by which a `/remediate` or `/generate-tests-*`
+     comment on an **issue** starts a pipeline — PaC matches push, MR and
+     MR-comment events only.
+8. Mints a **project** access token per application repository and writes
+   each into the pipeline namespace under its own Secret
+   (`scm-auth-secret`, `scm-auth-lightwell-secret`).
+9. Starts the **install-time smoke** (`demo-smoke-<component>` PipelineRun,
+   one per application, from the gitops entry's `rewriteImageRepository`
+   routing): it waits for the first `ci-build-publish` run the `.tekton`
+   commit in step 7 triggered, then promotes that image through the gitops
+   repo's dev/qa/prod values files once each — so every environment
+   Application lands Healthy instead of sitting in ImagePullBackOff on the
+   initial `latest` tag (see `pipelines/pipelines/demo-smoke.yaml`).
+10. Starts the **agentic CVE analysis** (`cve-analysis-<repo>` PipelineRun,
+   one per application, with a 3h timeout and the repo's own SCM secret as
+   `git-auth`): the same run an operator starts by hand with
+   `tkn pipeline start agentic-cve-analysis`, so the demo opens with CVE
+   issues already filed on the boards. Before creating the runs the job
+   waits for the pipeline itself plus the `tpa-secret`, `ai-agent-secret`
+   and `maven-settings` Secrets — a PipelineRun whose secret-backed
+   workspace binds a missing Secret hangs in PodInitializing forever
+   rather than failing. This step (like the smoke) is gated on
+   `pac.pipelineRuns`, which bootstrap derives from the Tekton component:
+   without the Tekton layer the Pipelines are never installed, and the
+   waits would abort the seeding. The runs themselves pass
+   `registry-wait-timeout: 30m` and `trustification-wait-timeout: 30m` —
+   they are created at wave 8 while the wave-10 Quay and RHTPA components
+   may still be configuring, and the run (not the job, which would
+   deadlock the waves) waits for the `quay-push` credential before
+   pushing and for RHTPA to accept uploads before the SBOM upload; both
+   waits run concurrently with the build, so they cost no wall-clock
+   time.
 
-Steps 5–8 are additions. Upstream imports repositories but has no concept of
+Steps 5–9 are additions. Upstream imports repositories but has no concept of
 labels on them, no webhooks, and no credential hand-off; on the reference
 cluster all of that was done by hand.
 
@@ -44,18 +78,27 @@ cluster all of that was done by hand.
 
 No token in this chart is committed, and none is templated into git.
 
-* **`gitlab-pac-token`** / **`gitlab-pac-webhook`** (pipeline namespace) are the
-  shared secret the Tekton GitLab interceptor validates `X-Gitlab-Token`
-  against. The Job reuses the Secret if it already exists, and otherwise
-  generates one — so PaC and GitLab always agree, and
-  re-running the Job does not invalidate a webhook already in use.
-* **`scm-auth-secret`** (pipeline namespace, keys `username`/`token`) is a
-  GitLab project access token scoped to the one application repository, at
-  Maintainer level so `open-pr` can push a branch. A project token's value is
-  returned only once, at creation, so the Job skips the whole block if the
-  Secret already holds a real token; if it does not, it revokes any stale
-  token of the same name (unrecoverable, and they would otherwise pile up) and
-  issues a fresh one.
+* **`gitlab-pac-token-<repo>`** (pipeline namespace, one per application
+  repository) is the project access token PaC reads that repository and
+  posts statuses with. One per project is not gold-plating: a GitLab
+  project-bot user is a member of exactly one project, so a shared Secret
+  would leave every Repository CR after the first authenticating with the
+  wrong project's token. **`gitlab-pac-webhook`** is the shared secret PaC
+  validates the webhook `X-Gitlab-Token` against (matched to the Repository
+  CR's `webhook_secret`), and **`gitlab-webhook-secret`** is the equivalent
+  for the EventListener's gitlab interceptor. The Job reuses each Secret if
+  it already exists, and otherwise generates one — so consumers and GitLab
+  always agree, and re-running the Job does not invalidate a webhook
+  already in use.
+* **`scm-auth-secret`** / **`scm-auth-lightwell-secret`** (pipeline
+  namespace, keys `username`/`token`) are per-application-repository GitLab
+  project access tokens at Maintainer level so `open-pr` can push a branch.
+  The EventListener's cel interceptors map each event's project to its own
+  Secret (see `pipelines/triggers/agentic-issue-triggers.yaml`). A project
+  token's value is returned only once, at creation, so the Job skips the
+  whole block if the Secret already holds a real token; if it does not, it
+  revokes any stale token of the same name (unrecoverable, and they would
+  otherwise pile up) and issues a fresh one.
 
 Writing into another namespace needs rights there:
 `templates/rbac-pipeline-ns.yaml` grants the `gitlab` ServiceAccount access to

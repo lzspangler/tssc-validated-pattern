@@ -13,7 +13,13 @@ spec:
   name: {{ .Values.operator.name }}
   source: {{ .Values.operator.source }}
   sourceNamespace: openshift-marketplace
-  # Manual + the InstallPlan approver Job below: an Automated subscription
-  # works too, but Manual keeps the approval visible as a Job the Argo
-  # Application's health can wait on (the x2a-fsc pattern).
-  installPlanApproval: Manual
+  # Automatic, like every other operator Subscription in this repo. A
+  # Manual subscription CANNOT be combined with a wave-later approver Job:
+  # Argo admits the approver's sync-wave only after this Subscription is
+  # Healthy, and the Subscription is Healthy only after its InstallPlan is
+  # approved -- by that approver. That exact cycle stalled a fresh install
+  # (cluster-hnjcl: sync operation "waiting for healthy state of
+  # Subscription" forever, every ExternalSecret in the cluster
+  # un-syncable, artifactory/gitlab/quay cascading OutOfSync). See the
+  # orchestrator component for the same conclusion reached earlier.
+  installPlanApproval: Automatic

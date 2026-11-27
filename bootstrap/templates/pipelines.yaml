@@ -2,10 +2,13 @@
 {{- $p := .Values.components.pipelines }}
 {{- $clusterDefaults := and .Values.components.pipelines.enabled .Values.components.tekton.enabled .Values.components.pipelines.clusterDefaults | default false }}
 # -----------------------------------------------------------------------------
-# OpenShift Pipelines operator. Pipelines-as-Code ships inside it and is the
-# CI trigger fabric for this demo: the application repo carries .tekton/
-# PipelineRuns (committed by the GitLab seeding job) and a PaC Repository CR
-# points PaC at it. There are no Tekton Triggers / EventListeners.
+# OpenShift Pipelines operator. Pipelines-as-Code ships inside it and is
+# HALF the CI trigger fabric for this demo: the application repo carries
+# .tekton/ PipelineRuns (committed by the GitLab seeding job) and a PaC
+# Repository CR points PaC at it for push / merge-request events. Issue-
+# comment slash commands (/remediate, /generate-tests-*) go through the
+# agentic-issue-commands EventListener instead (see tekton-triggers.yaml),
+# because PaC never matches issue-comment webhooks.
 #
 # The component also renders the pipeline namespace's Vault-backed Secrets
 # (tpa-secret, ai-agent-secret) and the post-sync cluster-defaults Job.

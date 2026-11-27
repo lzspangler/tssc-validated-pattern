@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.6.0",
+  "id": "LW-DEMO-0025",
+  "aliases": [
+    "CVE-2024-22243"
+  ],
+  "modified": "2026-11-01T00:00:00Z",
+  "published": "2026-11-01T00:00:00Z",
+  "summary": "Lightwell backport remediation for CVE-2024-22243 (org.springframework:spring-webmvc)",
+  "details": "Open redirect via MvcRequestMatcher when using URL-encoded path characters. Affects versions prior to 5.3.32; Lightwell backports the fix onto the 5.3.18 line.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Maven",
+        "name": "org.springframework:spring-webmvc",
+        "purl": "pkg:maven/org.springframework/spring-webmvc@5.3.18"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "5.3.18.rhlw-00010"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "5.3.18"
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://packages.redhat.com/lightwell/osv/java/remediated"
+    }
+  ]
+}

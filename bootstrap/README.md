@@ -73,23 +73,29 @@ same Vault-backed admin password and writes it into the pipeline namespace.
 The operator and the resources it runs are installed separately, because
 they are separate problems: `components/pipelines` subscribes to the
 operator, and the demo's own Tekton resources are plain YAML applied
-straight from `pipelines/` at the repo root. Three Applications:
+straight from `pipelines/` at the repo root. Four Applications:
 
 | Application | Source | Wave |
 |---|---|---|
 | `tekton-tasks` | `pipelines/tasks/` — 33 Tasks | 4 |
 | `tekton-config` | `pipelines/config/` — `ai-agent-config` + agent-skills | 4 |
 | `tekton-pipelines` | `pipelines/pipelines/` — 11 Pipelines | 5 |
+| `tekton-triggers` | `pipelines/triggers/` — issue-comment EventListener | 5 |
 
-There are no Tekton Triggers and no EventListeners. CI triggering is
-**Pipelines as Code**: the GitLab seeding job commits `.tekton/`
+CI triggering is split in two. Push, merge-request and MR-comment events go
+through **Pipelines as Code**: the GitLab seeding job commits `.tekton/`
 PipelineRuns (rendered per cluster from
 `components/gitlab/templates/cm-pac-pipelines.yaml`) into the application
-repository, mints a PaC project token (`gitlab-pac-token`), and creates the
-PaC `Repository` CR — PaC itself creates and validates the GitLab webhooks.
-The committed PipelineRuns reference the cluster-installed Pipelines by
-`pipelineRef`, so the pipeline definitions stay under Argo's selfHeal while
-the triggering lives in the repository it watches.
+repository, mints a PaC project token per application repo
+(`gitlab-pac-token-<repo>`), creates the
+PaC `Repository` CR, and registers the PaC webhook. Issue-comment slash
+commands (`/remediate`, `/generate-tests-*`) go through the
+**`agentic-issue-commands` EventListener**, because PaC never matches a
+comment on an issue; the seeding job points a Note Hook webhook at its
+Route with the `gitlab-webhook-secret` token. The committed PipelineRuns
+reference the cluster-installed Pipelines by `pipelineRef`, so the pipeline
+definitions stay under Argo's selfHeal while the triggering lives in the
+repository it watches.
 
 **`pipelineNamespace` is effectively fixed at `tssc-app-ci`** — RBAC under
 `pipelines/tasks/` hardcodes it, and a plain-YAML Application cannot

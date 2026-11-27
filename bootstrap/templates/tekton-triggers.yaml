@@ -1,0 +1,35 @@
+{{- if .Values.components.tekton.enabled }}
+{{- $tk := .Values.components.tekton }}
+{{- $ns := .Values.pipelineNamespace }}
+# -----------------------------------------------------------------------------
+# The issue-comment EventListener, synced as PLAIN YAML from
+# pipelines/triggers. This is the OTHER half of the trigger fabric:
+# Pipelines-as-Code owns push / merge-request events (via the .tekton/
+# PipelineRuns committed into the application repos), while this
+# EventListener owns ISSUE-COMMENT slash commands (/remediate,
+# /generate-tests-*), which PaC cannot match.
+#
+# The GitLab seeding job (wave 8) waits for the Route this Application
+# creates and points a Note Hook webhook at it, so this must sync before
+# the gitlab component. Tekton Triggers itself is installed by the
+# OpenShift Pipelines operator alongside Pipelines -- no extra
+# Subscription is needed.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" "tekton-triggers" "namespace" .Values.argocd.namespace "syncWave" $tk.syncWaves.triggers "root" .) }}
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.tektonPath }}/triggers
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- if ne $ns "tssc-app-ci" }}
+{{- fail (printf "pipelineNamespace is %q, but the EventListener ClusterRoleBinding under pipelines/triggers/ hardcodes tssc-app-ci. Edit that file to match before changing pipelineNamespace." $ns) }}
+{{- end }}
+{{- end }}

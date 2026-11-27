@@ -35,6 +35,31 @@ spec:
       type: string
       description: Application commit the image was built from; forwarded for MR context.
       default: ""
+    # ---------------- per-application promotion routing ----------------
+    # WITHOUT these, the created run falls back to gitops-cd-dev's DEFAULTS,
+    # which serve the spring-boot example: every application's CI then
+    # promotes into the FIRST application's gitops repo (on cluster-dl265 a
+    # lightwell build wrote its tag into spring-boot's dev values, and two
+    # lightwell CI runs even published under the spring-boot image name from
+    # a stale .tekton definition). The pipeline (ci-build-publish) passes
+    # these through from its own params, which the per-repo .tekton/
+    # definitions set per application.
+    - name: GITOPS_URL
+      type: string
+      description: GitLab URL of the gitops repository to promote into.
+      default: https://gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io/development/spring-boot-example-gitops
+    - name: GIT_HOST
+      type: string
+      description: Host of the SCM serving the gitops repository.
+      default: gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io
+    - name: VALUES_PATH
+      type: string
+      description: Values file inside the gitops repo whose image.tag is bumped.
+      default: app/spring-boot-example/environments/dev/values.yaml
+    - name: SCM_SECRET_NAME
+      type: string
+      description: Secret holding the gitops repository's own project access token.
+      default: scm-auth-gitops-secret
     - name: GIT_IMAGE
       type: string
       description: >-
@@ -61,6 +86,14 @@ spec:
           value: $(params.APP_REPO_URL)
         - name: PARAM_APP_COMMIT
           value: $(params.APP_COMMIT)
+        - name: PARAM_GITOPS_URL
+          value: $(params.GITOPS_URL)
+        - name: PARAM_GIT_HOST
+          value: $(params.GIT_HOST)
+        - name: PARAM_VALUES_PATH
+          value: $(params.VALUES_PATH)
+        - name: PARAM_SCM_SECRET_NAME
+          value: $(params.SCM_SECRET_NAME)
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
@@ -78,6 +111,10 @@ spec:
           --arg image "${PARAM_IMAGE}" \
           --arg repo "${PARAM_APP_REPO_URL}" \
           --arg commit "${PARAM_APP_COMMIT}" \
+          --arg gitops_url "${PARAM_GITOPS_URL}" \
+          --arg git_host "${PARAM_GIT_HOST}" \
+          --arg values_path "${PARAM_VALUES_PATH}" \
+          --arg scm_secret "${PARAM_SCM_SECRET_NAME}" \
           '{
             apiVersion: "tekton.dev/v1",
             kind: "PipelineRun",
@@ -96,7 +133,11 @@ spec:
               params: [
                 { name: "image",       value: $image },
                 { name: "app-repo-url", value: $repo },
-                { name: "app-commit",  value: $commit }
+                { name: "app-commit",  value: $commit },
+                { name: "gitops-url",  value: $gitops_url },
+                { name: "git-host",    value: $git_host },
+                { name: "values-path", value: $values_path },
+                { name: "scm-secret-name", value: $scm_secret }
               ]
             }
           }')"
@@ -135,7 +176,9 @@ metadata:
 rules:
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns"]
-    verbs: ["create", "get"]
+    # "list" also covers wait-for-ci-build (demo-smoke), which polls
+    # PipelineRuns as the same `pipeline` SA to chain onto CI's run.
+    verbs: ["create", "get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

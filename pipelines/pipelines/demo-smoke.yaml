@@ -1,0 +1,201 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  labels:
+    pipelines.openshift.io/runtime: generic
+    pipelines.openshift.io/strategy: docker
+    pipelines.openshift.io/used-by: build-cloud
+    app.kubernetes.io/part-of: maven-build-ci
+  name: demo-smoke
+spec:
+  # Install-time smoke: land every environment Application in Healthy state.
+  #
+  # The six environment Applications (spring-boot-example-{dev,qa,prod},
+  # lightwell-java-demo-{dev,qa,prod}) go Degraded right after install by
+  # design: Argo creates each Deployment from the imported gitops chart while
+  # its image.tag is still the initial "latest", a tag nothing ever pushes --
+  # CI publishes :<sha> tags and promotions bump the values files -- so the
+  # pods sit in ImagePullBackOff (see bootstrap/templates/app-environments.yaml).
+  # This pipeline closes that gap ONCE, at install time, so the demo opens on
+  # a fully green board instead of six red environments:
+  #
+  #   1. wait-for-ci-build: the GitLab seeding job's .tekton commit fires the
+  #      application's first ci-build-publish run through Pipelines-as-Code;
+  #      this waits for it to Succeed and exports the image it published
+  #      (no second build -- the smoke reuses CI's own output).
+  #   2. promote-{dev,qa,prod}: one gitops-bump-image per environment, in
+  #      order, each opening (and auto-merging) the same promotion MR the
+  #      human-triggered gitops-cd-{dev,qa,prod} pipelines make. dev is
+  #      idempotent here: CI's finally task already promoted it, and a
+  #      promotion whose tag is already current is a no-op.
+  #
+  # Started once per application by the seeding playbook (fixed-name
+  # PipelineRun demo-smoke-<component>, see cm-gitlab-init.yaml), which knows
+  # each application's gitops repo, chart path and per-repo SCM secret --
+  # none of which are derivable from the application repo URL alone
+  # (spring-boot-example-application promotes into spring-boot-example-gitops
+  # under app/spring-boot-example/; lightwell-java-demo-app into
+  # lightwell-java-demo-app-gitops under app/lightwell-java-demo/).
+  #
+  # This is deliberately a ONE-TIME install behavior: ongoing pushes keep the
+  # designed promotion semantics (dev auto-promotes from CI; qa and prod stay
+  # human/orchestrator decisions via the gitops-cd-* pipelines).
+  params:
+    - name: app-repo-url
+      type: string
+      description: Application repository whose CI run is waited for (also MR context).
+    # ---------------- gitops repo ----------------
+    # Defaults serve the spring-boot example on the reference cluster; the
+    # seeding job passes these explicitly per application. Like
+    # gitops-cd-{dev,qa,prod}, gitops-url / git-host are rewritten on cluster
+    # moves by the tekton-cluster-defaults Job (components/pipelines).
+    - name: gitops-url
+      type: string
+      description: GitLab URL of the gitops repository to promote into.
+      default: https://gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io/development/spring-boot-example-gitops
+    - name: git-host
+      type: string
+      description: Host of the SCM serving the gitops repository.
+      default: gitlab-gitlab.apps.cluster-b7zgr.dyn.redhatworkshops.io
+    - name: dev-values-path
+      type: string
+      description: Values file inside the gitops repo whose image.tag is bumped for dev.
+      default: app/spring-boot-example/environments/dev/values.yaml
+    - name: qa-values-path
+      type: string
+      description: Values file inside the gitops repo whose image.tag is bumped for qa.
+      default: app/spring-boot-example/environments/qa/values.yaml
+    - name: prod-values-path
+      type: string
+      description: Values file inside the gitops repo whose image.tag is bumped for prod.
+      default: app/spring-boot-example/environments/prod/values.yaml
+    - name: base-branch
+      type: string
+      description: Branch of the gitops repo the promotion MRs target.
+      default: main
+    - name: scm-secret-name
+      type: string
+      description: >-
+        Secret holding the gitops repository's own project access token (NOT
+        the application repository's -- a GitLab project bot is a member of
+        exactly one project).
+      default: scm-auth-gitops-secret
+    # ---------------- runtime ----------------
+    - name: agent-image
+      type: string
+      description: >-
+        Image the promotions run in (must bundle git + glab, and curl + jq for
+        the wait task). The agent image is reused so no new image has to be
+        built or pulled for the smoke.
+      default: quay.io/sscdemo/ai-agent-maven-aider:v1.0.1
+    - name: ci-pipeline
+      type: string
+      description: CI pipeline whose run is waited for.
+      default: ci-build-publish
+    - name: ci-namespace
+      type: string
+      description: Namespace the CI run lives in.
+      default: tssc-app-ci
+    - name: wait-timeout
+      type: string
+      description: How long to wait for the CI run (must fit the run's pipeline timeout).
+      default: 90m
+  tasks:
+    - name: wait-for-ci-build
+      taskRef:
+        kind: Task
+        name: wait-for-ci-build
+      params:
+        - name: APP_REPO_URL
+          value: $(params.app-repo-url)
+        - name: PIPELINE
+          value: $(params.ci-pipeline)
+        - name: NAMESPACE
+          value: $(params.ci-namespace)
+        - name: TIMEOUT
+          value: $(params.wait-timeout)
+        - name: GIT_IMAGE
+          value: $(params.agent-image)
+    - name: promote-dev
+      taskRef:
+        kind: Task
+        name: gitops-bump-image
+      runAfter:
+        - wait-for-ci-build
+      params:
+        - name: GIT_URL
+          value: $(params.gitops-url)
+        - name: GIT_HOST
+          value: $(params.git-host)
+        - name: IMAGE
+          value: $(tasks.wait-for-ci-build.results.IMAGE)
+        - name: VALUES_PATH
+          value: $(params.dev-values-path)
+        - name: ENVIRONMENT
+          value: dev
+        - name: BASE_BRANCH
+          value: $(params.base-branch)
+        # All three merge immediately: the point of the smoke is a green
+        # board at the end of install, not a review queue.
+        - name: AUTO_MERGE
+          value: "true"
+        - name: APP_REPO_URL
+          value: $(params.app-repo-url)
+        - name: SCM_SECRET_NAME
+          value: $(params.scm-secret-name)
+        - name: GIT_IMAGE
+          value: $(params.agent-image)
+    - name: promote-qa
+      taskRef:
+        kind: Task
+        name: gitops-bump-image
+      runAfter:
+        - promote-dev
+      params:
+        - name: GIT_URL
+          value: $(params.gitops-url)
+        - name: GIT_HOST
+          value: $(params.git-host)
+        - name: IMAGE
+          value: $(tasks.wait-for-ci-build.results.IMAGE)
+        - name: VALUES_PATH
+          value: $(params.qa-values-path)
+        - name: ENVIRONMENT
+          value: qa
+        - name: BASE_BRANCH
+          value: $(params.base-branch)
+        - name: AUTO_MERGE
+          value: "true"
+        - name: APP_REPO_URL
+          value: $(params.app-repo-url)
+        - name: SCM_SECRET_NAME
+          value: $(params.scm-secret-name)
+        - name: GIT_IMAGE
+          value: $(params.agent-image)
+    - name: promote-prod
+      taskRef:
+        kind: Task
+        name: gitops-bump-image
+      runAfter:
+        - promote-qa
+      params:
+        - name: GIT_URL
+          value: $(params.gitops-url)
+        - name: GIT_HOST
+          value: $(params.git-host)
+        - name: IMAGE
+          value: $(tasks.wait-for-ci-build.results.IMAGE)
+        - name: VALUES_PATH
+          value: $(params.prod-values-path)
+        - name: ENVIRONMENT
+          value: prod
+        - name: BASE_BRANCH
+          value: $(params.base-branch)
+        - name: AUTO_MERGE
+          value: "true"
+        - name: APP_REPO_URL
+          value: $(params.app-repo-url)
+        - name: SCM_SECRET_NAME
+          value: $(params.scm-secret-name)
+        - name: GIT_IMAGE
+          value: $(params.agent-image)

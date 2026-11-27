@@ -1,0 +1,100 @@
+{{- $ns := .Values.pipelineNamespace }}
+{{- $store := .Values.vault.secretStoreName | default "vault-cluster" }}
+{{- $prefix := .Values.vault.pathPrefix | default "tssc-validated-pattern" }}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: ops-tpa-credentials
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: {{ $store | quote }}
+    kind: ClusterSecretStore
+  target:
+    name: ops-tpa-credentials
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        oidc_client_id: tpa-cli
+        tpa_url: {{ .Values.tpa.url | quote }}
+        oidc_issuer_url: {{ .Values.oidc.issuerUrl | quote }}
+        # The remoteRef'd value must be rendered in the template too:
+        # ESO's default mergePolicy is Replace, which drops data[] entries
+        # not present in the template.
+        oidc_client_secret: '{{ "{{" }} .oidc_client_secret {{ "}}" }}'
+  data:
+    - secretKey: oidc_client_secret
+      remoteRef:
+        key: {{ printf "%s/tpa-cli-client-secret" $prefix | quote }}
+        property: client-secret
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rhtpa-load-lightwell-data
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+    # Replace+Force: re-runs on every sync; the script is idempotent.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: load
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3", "-I", "/scripts/load.py"]
+          # Explicit env entries (not envFrom): the Secret's keys are
+          # lowercase (oidc_client_id, tpa_url, ...) but the script expects
+          # uppercase env vars (TPA_URL, OIDC_ISSUER_URL, ...). envFrom
+          # would import the lowercase names verbatim.
+          env:
+            - name: TPA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: tpa_url
+            - name: OIDC_ISSUER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: oidc_issuer_url
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: oidc_client_id
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ops-tpa-credentials
+                  key: oidc_client_secret
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+            - name: osv-data
+              mountPath: /data/osv
+            - name: sbom-data
+              mountPath: /data/sbom
+      volumes:
+        - name: script
+          configMap:
+            name: lightwell-data-loader
+        - name: osv-data
+          configMap:
+            name: lightwell-data-osv
+        - name: sbom-data
+          configMap:
+            name: lightwell-data-sbom

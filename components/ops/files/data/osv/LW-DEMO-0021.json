@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.6.0",
+  "id": "LW-DEMO-0021",
+  "aliases": [
+    "CVE-2023-51074"
+  ],
+  "modified": "2026-11-01T00:00:00Z",
+  "published": "2026-11-01T00:00:00Z",
+  "summary": "Lightwell backport remediation for CVE-2023-51074 (com.jayway.jsonpath:json-path)",
+  "details": "Denial of service via crafted JSON path expressions that cause excessive memory allocation. Upstream fixes this in 2.9.0; Lightwell backports the fix onto the 2.8.0 line.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Maven",
+        "name": "com.jayway.jsonpath:json-path",
+        "purl": "pkg:maven/com.jayway.jsonpath/json-path@2.8.0"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.8.0.rhlw-00001"
+            }
+          ]
+        }
+      ],
+      "versions": [
+        "2.8.0"
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "WEB",
+      "url": "https://packages.redhat.com/lightwell/osv/java/remediated"
+    }
+  ]
+}

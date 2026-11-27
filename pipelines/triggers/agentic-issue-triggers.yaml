@@ -1,0 +1,889 @@
+# =============================================================================
+# Issue-comment triggers: start a pipeline by commenting a slash-command on a
+# GitLab issue. One EventListener (one webhook / Route) hosts BOTH commands; each
+# trigger's cel `filter` picks the command it handles, so a comment only starts the
+# matching pipeline:
+#
+#   /remediate       ->  agentic-cve-remediation   (reads a decision from the issue)
+#   /generate-tests-unit        ->  agentic-test-generation-unit
+#   /generate-tests-functional   ->  agentic-test-generation-functional
+#   /generate-tests-integration  ->  agentic-test-generation-integration
+#
+# WHY AN EVENTLISTENER ALONGSIDE PIPELINES-AS-CODE
+# The demo's trigger fabric is deliberately split in two:
+#
+#   * PUSH and MERGE-REQUEST events go through Pipelines as Code: the app
+#     repos carry .tekton/ PipelineRuns (committed by the GitLab seeding
+#     job) and Repository CRs point PaC at them.
+#   * ISSUE-COMMENT events go through this EventListener, because PaC only
+#     understands push, MR and MR-comment webhooks -- it never matches a
+#     comment on an ISSUE, and the slash commands above are the demo's
+#     interactive entry point for remediation and test generation.
+#
+# The two never overlap: PaC's webhook carries push/MR events only, and the
+# webhook pointing here carries Note Hooks only (the cel filters below then
+# drop everything that is not an issue comment starting with a command).
+# The GitLab seeding job (components/gitlab/templates/cm-gitlab-init.yaml)
+# creates BOTH webhooks and mints the shared gitlab-webhook-secret this
+# EventListener validates X-Gitlab-Token against.
+#
+# ---- commenter authorization ---------------------------------------------
+# The webhook token authenticates GITLAB to the EventListener; it says
+# nothing about the COMMENTER. GitLab's Note Hook payload carries no role
+# or permission data for the commenting user (just id/name/username), and
+# cel cannot call the GitLab API -- so the only enforceable check here is
+# a username allowlist. Every filter below requires
+#   body.user.username in ['root'] || body.user.username.startsWith('project_')
+#
+# NOTE on the second clause: a GitLab PROJECT ACCESS TOKEN does not act
+# under its human-readable name ("ssc-demo-pipeline" is the token NAME) --
+# the bot user in the payload is project_<id>_bot_<hash>, and the hash is
+# minted per token creation, so it differs on every install. Matching the
+# project_ prefix is still safe AND durable: a project-bot user is a
+# member of exactly its own project, so any project_* user commenting on
+# this project's issue is necessarily one of THIS project's tokens (all of
+# which the seeding job creates at Maintainer level). Fail closed: an
+# unknown human commenter is rejected, not silently run. If you seed demo
+# users (gitlab.users in the gitlab component), ADD THEM to the ['root']
+# list in all four filters -- a missing username is indistinguishable from
+# an unauthorized one, and the symptom of forgetting is exactly "the
+# command did not trigger a pipeline".
+#
+# ---- per-repository SCM credentials --------------------------------------
+# Each application repository has its OWN project-scoped token Secret in
+# the pipeline namespace (a GitLab project bot is a member of exactly one
+# project). The scm_secret overlay in each trigger maps the event's
+# project to its Secret, and the bindings forward it as the pipeline's
+# scm-secret-name parameter. Extend the mapping when adding an app repo.
+#
+# Flow:  GitLab issue comment  ->  webhook (Note Hook)  ->  EventListener
+#        ->  gitlab interceptor (validate X-Gitlab-Token, event type)
+#        ->  cel interceptor (filter on the command [+ merge the decision])
+#        ->  TriggerBinding (extensions/body -> params)
+#        ->  TriggerTemplate (create the PipelineRun)
+#
+# ---- /remediate --------------------------------------------------------------
+# The six-field decision (SELECTED / CVE_ID / PACKAGE / CURRENT_VERSION /
+# FIXED_VERSION / JUSTIFICATION) is read from the ISSUE BODY, where it must sit
+# inside an HTML-comment marker so it stays invisible in rendered markdown:
+#
+#     <!-- cve-decision
+#     SELECTED: "1"
+#     CVE_ID: CVE-2024-12345
+#     PACKAGE: com.example:widget
+#     CURRENT_VERSION: 1.2.3
+#     FIXED_VERSION: 1.2.4
+#     JUSTIFICATION: High-severity RCE with a clean single-dependency bump.
+#     -->
+#
+# A commenter can OVERRIDE any of the six fields by putting YAML or JSON directly
+# after the /remediate command (no code fences), e.g.:
+#
+#     /remediate
+#     FIXED_VERSION: 1.2.5
+#     JUSTIFICATION: bumping to the latest patch instead
+#
+#   ...or as JSON:  /remediate {"FIXED_VERSION": "1.2.5"}
+#
+# Comment values win over issue values; anything absent from both falls back to a
+# default (SELECTED defaults to "1" since a human explicitly asked to remediate).
+# If the merged SELECTED is "0", the pipeline clones and then no-ops (its tail is
+# gated on SELECTED == "1").
+# =============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tekton-triggers-sa
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+---
+# Namespaced permissions the EventListener needs: read Trigger* resources and
+# create PipelineRuns in this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tekton-triggers-eventlistener-binding
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+subjects:
+  - kind: ServiceAccount
+    name: tekton-triggers-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-roles
+---
+# Cluster-scoped permission the EventListener needs to reach ClusterInterceptors
+# (gitlab, cel). NOTE: set the subject namespace to your pipeline namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tekton-triggers-eventlistener-clusterbinding
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+subjects:
+  - kind: ServiceAccount
+    name: tekton-triggers-sa
+    namespace: tssc-app-ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-clusterroles
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: cve-remediation-issue-binding
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  params:
+    # Repo + SCM coordinates come straight from the GitLab payload (git-host is
+    # derived in the cel interceptor via parseURL).
+    - name: git-url
+      value: $(body.project.git_http_url)
+    - name: git-host
+      value: $(extensions.git_host)
+    - name: base-branch
+      value: $(extensions.base_branch)
+    # Per-repository SCM credential (cel overlay; see the header note).
+    - name: scm-secret-name
+      value: $(extensions.scm_secret)
+    # The merged six-field decision (comment overrides issue; see cel overlays).
+    - name: SELECTED
+      value: $(extensions.SELECTED)
+    - name: CVE_ID
+      value: $(extensions.CVE_ID)
+    - name: PACKAGE
+      value: $(extensions.PACKAGE)
+    - name: CURRENT_VERSION
+      value: $(extensions.CURRENT_VERSION)
+    - name: FIXED_VERSION
+      value: $(extensions.FIXED_VERSION)
+    - name: JUSTIFICATION
+      value: $(extensions.JUSTIFICATION)
+    # The commented-on issue's project-scoped number, so the opened MR can link
+    # back to it (see the issue_iid overlay in the EventListener).
+    - name: issue-iid
+      value: $(extensions.issue_iid)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: cve-remediation-issue-template
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  params:
+    - name: git-url
+    - name: git-host
+    - name: base-branch
+      default: main
+    - name: scm-provider
+      default: gitlab
+    - name: subdirectory
+      default: source
+    - name: SELECTED
+      default: "1"
+    - name: CVE_ID
+      default: ""
+    - name: PACKAGE
+      default: ""
+    - name: CURRENT_VERSION
+      default: ""
+    - name: FIXED_VERSION
+      default: ""
+    - name: JUSTIFICATION
+      default: ""
+    - name: issue-iid
+      default: ""
+    # Workspace backing — override to match your cluster's storage/config.
+    - name: workspace-size
+      default: 2Gi
+    - name: scm-secret-name
+      default: scm-auth-secret
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: agentic-cve-remediation-issue-
+        labels:
+          app.kubernetes.io/part-of: maven-build-ci
+          tekton.dev/pipeline: agentic-cve-remediation
+          trigger: gitlab-issue
+      spec:
+        pipelineRef:
+          name: agentic-cve-remediation
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-host
+            value: $(tt.params.git-host)
+          - name: base-branch
+            value: $(tt.params.base-branch)
+          - name: scm-provider
+            value: $(tt.params.scm-provider)
+          - name: subdirectory
+            value: $(tt.params.subdirectory)
+          - name: scm-secret-name
+            value: $(tt.params.scm-secret-name)
+          - name: SELECTED
+            value: $(tt.params.SELECTED)
+          - name: CVE_ID
+            value: $(tt.params.CVE_ID)
+          - name: PACKAGE
+            value: $(tt.params.PACKAGE)
+          - name: CURRENT_VERSION
+            value: $(tt.params.CURRENT_VERSION)
+          - name: FIXED_VERSION
+            value: $(tt.params.FIXED_VERSION)
+          - name: JUSTIFICATION
+            value: $(tt.params.JUSTIFICATION)
+          - name: issue-iid
+            value: $(tt.params.issue-iid)
+        workspaces:
+          - name: workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: $(tt.params.workspace-size)
+          # maven-settings carries the settings.xml that routes ALL dependency
+          # resolution through the Artifactory `maven` virtual repo. re-run-tests
+          # runs `mvn verify` against the remediated tree, and the whole point of
+          # the remediation is a backported coordinate that is NOT on Maven
+          # Central -- so the build has to resolve through the mirror or it fails
+          # to find the very version the agent just pinned. An emptyDir would let
+          # the maven task generate a default settings.xml pointed at Central.
+          #
+          # A Secret, not a ConfigMap: Artifactory OSS has anonymous access off,
+          # so the settings.xml embeds a <server> credential. The maven task's
+          # generate step copies `<workspace>/settings.xml` verbatim when it is
+          # present, which is exactly the Secret's single data key.
+          #
+          # The Secret MUST exist in this namespace before a trigger fires -- a
+          # secret-backed workspace whose Secret is missing leaves the pod stuck
+          # in PodInitializing forever (never errors, just hangs), the same trap
+          # as a missing git-auth secret. Create it from
+          # secrets/maven-settings-secret.example.yaml:
+          #   oc -n tssc-app-ci create secret generic maven-settings \
+          #     --from-file=settings.xml=./settings.xml
+          - name: maven-settings
+            secret:
+              secretName: maven-settings
+          # NOTE: git-auth (clone credentials) is intentionally NOT bound here.
+          # It is optional on the pipeline, and a secret-backed workspace whose
+          # secret is missing leaves the clone pod stuck in PodInitializing
+          # forever (never an error, just hangs) -- there is no way to bind it
+          # conditionally in a TriggerTemplate. For a PUBLIC app repo the clone
+          # needs no auth, so we omit it. For a PRIVATE repo, create a basic-auth
+          # Secret named `git-auth` and add it back:
+          #   - name: git-auth
+          #     secret:
+          #       secretName: git-auth
+---
+# ---- /generate-tests-unit -----------------------------------------------------
+# The test-generation commands carry no decision -- they only need the repo
+# coordinates (git-url from the payload, git-host + base-branch derived in cel),
+# so their bindings/templates are much simpler than the remediation pair above.
+# All three (unit/functional/integration) share ONE TriggerBinding --
+# test-generation-issue-binding -- because it extracts nothing command-specific;
+# each command just gets its own TriggerTemplate (own PipelineRun shape) and its
+# own EventListener trigger (own cel filter).
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: test-generation-issue-binding
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  params:
+    - name: git-url
+      value: $(body.project.git_http_url)
+    - name: git-host
+      value: $(extensions.git_host)
+    - name: base-branch
+      value: $(extensions.base_branch)
+    # Per-repository SCM credential (cel overlay; see the header note).
+    - name: scm-secret-name
+      value: $(extensions.scm_secret)
+    # The commented-on issue's project-scoped number, so the opened MR can link
+    # back to it (see the issue_iid overlay in the EventListener).
+    - name: issue-iid
+      value: $(extensions.issue_iid)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: test-generation-unit-issue-template
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  params:
+    - name: git-url
+    - name: git-host
+    - name: base-branch
+      default: main
+    - name: scm-provider
+      default: gitlab
+    - name: subdirectory
+      default: source
+    - name: issue-iid
+      default: ""
+    # Workspace backing -- override to match your cluster's storage/config.
+    - name: workspace-size
+      default: 2Gi
+    - name: scm-secret-name
+      default: scm-auth-secret
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: agentic-test-generation-unit-issue-
+        labels:
+          app.kubernetes.io/part-of: maven-build-ci
+          tekton.dev/pipeline: agentic-test-generation-unit
+          trigger: gitlab-issue
+      spec:
+        pipelineRef:
+          name: agentic-test-generation-unit
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-host
+            value: $(tt.params.git-host)
+          - name: base-branch
+            value: $(tt.params.base-branch)
+          - name: scm-provider
+            value: $(tt.params.scm-provider)
+          - name: subdirectory
+            value: $(tt.params.subdirectory)
+          - name: scm-secret-name
+            value: $(tt.params.scm-secret-name)
+          - name: issue-iid
+            value: $(tt.params.issue-iid)
+        workspaces:
+          - name: workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: $(tt.params.workspace-size)
+          # maven-settings carries the settings.xml that routes ALL dependency
+          # resolution through the Artifactory `maven` virtual repo. Both
+          # ai-generate-tests-unit (the agent's own `mvn test` plus its scratch
+          # verification build) and re-run-tests need it: once a remediation PR
+          # has merged, the tree carries a Lightwell backport pin that does not
+          # exist on Maven Central. See the remediation template above for the
+          # full reasoning and the `oc create secret` command. The Secret MUST
+          # exist in this namespace or the pod hangs in PodInitializing.
+          - name: maven-settings
+            secret:
+              secretName: maven-settings
+          # git-auth intentionally NOT bound -- same reasoning as the remediation
+          # template above (optional workspace; a missing secret hangs the clone
+          # pod). For a PRIVATE repo, create a `git-auth` Secret and add it back.
+---
+# ---- /generate-tests-functional ----------------------------------------------
+# Same shape as test-generation-unit-issue-template above, pointing at the functional
+# pipeline. Shares test-generation-issue-binding (nothing command-specific in it).
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: test-generation-functional-issue-template
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  params:
+    - name: git-url
+    - name: git-host
+    - name: base-branch
+      default: main
+    - name: scm-provider
+      default: gitlab
+    - name: subdirectory
+      default: source
+    - name: issue-iid
+      default: ""
+    # Workspace backing -- override to match your cluster's storage/config.
+    - name: workspace-size
+      default: 2Gi
+    - name: scm-secret-name
+      default: scm-auth-secret
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: agentic-test-generation-functional-issue-
+        labels:
+          app.kubernetes.io/part-of: maven-build-ci
+          tekton.dev/pipeline: agentic-test-generation-functional
+          trigger: gitlab-issue
+      spec:
+        pipelineRef:
+          name: agentic-test-generation-functional
+        # The generation task defaults to 12 agent attempts; an attempt costs
+        # ~5 min (agent + verify), so Tekton's 1h default would cut the loop
+        # at ~9 attempts. 2h with the task's 90-min step budget leaves room
+        # for clone/package/deploy upstream and reset/re-run/open-pr
+        # downstream. Like taskRunSpecs below, this is a PipelineRun-only
+        # field -- set it here, never on the Pipeline (the API server prunes
+        # it); manual/console runs must set it on their own PipelineRun.
+        # MUST be spec.timeouts.pipeline, NOT the legacy spec.timeout: the
+        # OpenShift admission webhook that defaults spec.timeouts.pipeline
+        # from TektonConfig default-timeout-minutes IGNORES the legacy field
+        # and overwrites it with the platform default (verified with
+        # --dry-run=server: legacy timeout: 2h came back as 3h0m0s).
+        timeouts:
+          pipeline: "2h"
+        # Pin the ephemeral-resource and K8s-API-touching tasks to the `pipeline`
+        # service account: the deploy/reset/cleanup RBAC (Role
+        # app-under-test-lifecycle + system:image-builder, in
+        # tasks/deploy-app-under-test.yaml) is granted to it, and the generation
+        # task's health-check/reset/log-fetch helpers authenticate with the task
+        # pod's SA token. Pinning is deterministic: without taskRunSpecs the SA
+        # comes from the PipelineRun's subject, which manual runs, the webhook,
+        # and the console each set differently.
+        #
+        # This MUST live on the PipelineRun, not in the Pipeline definition:
+        # taskRunSpecs is a PipelineRun-only field, and the API server silently
+        # prunes it from Pipeline specs (sync "succeeds", Argo CD never
+        # converges). The flattened v1 shape below -- serviceAccountName
+        # directly under the entry, no taskServiceSpecs/taskPodTemplate nesting
+        # -- is what this cluster's Tekton (OpenShift Pipelines 1.24.x, Tekton
+        # v1.15) declares in its CRD. Pinning therefore applies to
+        # webhook-started runs only; a manual or console run must set it on the
+        # PipelineRun it creates.
+        taskRunSpecs:
+          - pipelineTaskName: deploy-app-under-test
+            serviceAccountName: pipeline
+          - pipelineTaskName: ai-generate-tests-functional
+            serviceAccountName: pipeline
+          - pipelineTaskName: reset-app-under-test
+            serviceAccountName: pipeline
+          - pipelineTaskName: cleanup-app-under-test
+            serviceAccountName: pipeline
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-host
+            value: $(tt.params.git-host)
+          - name: base-branch
+            value: $(tt.params.base-branch)
+          - name: scm-provider
+            value: $(tt.params.scm-provider)
+          - name: subdirectory
+            value: $(tt.params.subdirectory)
+          - name: scm-secret-name
+            value: $(tt.params.scm-secret-name)
+          - name: issue-iid
+            value: $(tt.params.issue-iid)
+        workspaces:
+          - name: workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: $(tt.params.workspace-size)
+          # maven-settings: the functional task's agent adds TEST-SCOPED deps
+          # (REST Assured) that must resolve through the mirror, and it runs
+          # Maven itself (app package + verification builds). Same reasoning
+          # and same `oc create secret` command as the templates above. The
+          # Secret MUST exist in this namespace or the pod hangs in
+          # PodInitializing.
+          - name: maven-settings
+            secret:
+              secretName: maven-settings
+          # git-auth intentionally NOT bound -- same reasoning as the remediation
+          # template above (optional workspace; a missing secret hangs the clone
+          # pod). For a PRIVATE repo, create a `git-auth` Secret and add it back.
+---
+# ---- /generate-tests-integration ---------------------------------------------
+# Same shape as test-generation-unit-issue-template above, pointing at the integration
+# pipeline. Shares test-generation-issue-binding (nothing command-specific in it).
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: test-generation-integration-issue-template
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  params:
+    - name: git-url
+    - name: git-host
+    - name: base-branch
+      default: main
+    - name: scm-provider
+      default: gitlab
+    - name: subdirectory
+      default: source
+    - name: issue-iid
+      default: ""
+    # Workspace backing -- override to match your cluster's storage/config.
+    - name: workspace-size
+      default: 2Gi
+    - name: scm-secret-name
+      default: scm-auth-secret
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: agentic-test-generation-integration-issue-
+        labels:
+          app.kubernetes.io/part-of: maven-build-ci
+          tekton.dev/pipeline: agentic-test-generation-integration
+          trigger: gitlab-issue
+      spec:
+        pipelineRef:
+          name: agentic-test-generation-integration
+        # 2h for the same reason as the functional template above: 12
+        # generation attempts x ~5 min each does not fit a 1h run.
+        # PipelineRun-only field, and it must be spec.timeouts.pipeline (not
+        # the legacy spec.timeout, which the OpenShift admission defaulting
+        # overwrites -- see the functional template above).
+        timeouts:
+          pipeline: "2h"
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-host
+            value: $(tt.params.git-host)
+          - name: base-branch
+            value: $(tt.params.base-branch)
+          - name: scm-provider
+            value: $(tt.params.scm-provider)
+          - name: subdirectory
+            value: $(tt.params.subdirectory)
+          - name: scm-secret-name
+            value: $(tt.params.scm-secret-name)
+          - name: issue-iid
+            value: $(tt.params.issue-iid)
+        workspaces:
+          - name: workspace
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: $(tt.params.workspace-size)
+          # maven-settings: the integration task's agent adds TEST-SCOPED deps
+          # (WireMock, Awaitility) that must resolve through the mirror, and it
+          # runs Maven itself (verification builds). Same reasoning and same
+          # `oc create secret` command as the templates above. The Secret MUST
+          # exist in this namespace or the pod hangs in PodInitializing.
+          - name: maven-settings
+            secret:
+              secretName: maven-settings
+          # git-auth intentionally NOT bound -- same reasoning as the remediation
+          # template above (optional workspace; a missing secret hangs the clone
+          # pod). For a PRIVATE repo, create a `git-auth` Secret and add it back.
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: agentic-issue-commands
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  serviceAccountName: tekton-triggers-sa
+  triggers:
+    - name: gitlab-issue-remediate
+      interceptors:
+        # 1) Validate the shared secret token and that this is a comment event.
+        - ref:
+            name: gitlab
+          params:
+            - name: secretRef
+              value:
+                secretName: gitlab-webhook-secret
+                secretKey: secretToken
+            - name: eventTypes
+              value:
+                - "Note Hook"
+        # 2) Only act on issue comments beginning with /remediate.
+        #
+        # Two cel-interceptor gotchas shape the structure below:
+        #
+        #  (1) Overlays within a SINGLE cel interceptor do NOT chain -- they are all
+        #      evaluated against the same starting extensions (empty), so an overlay
+        #      cannot read an extension set by a sibling ("no such key"). Extensions
+        #      only become visible to the NEXT interceptor. So the decision merge is
+        #      split into three sequential cel interceptors by dependency:
+        #        (a) raw text  ->  (b) parsed maps  ->  (c) merged fields.
+        #
+        #  (2) The overlay `key` is relative to the extensions root already, so it
+        #      must be BARE (key: issueRaw), NOT prefixed (key: extensions.issueRaw).
+        #      A prefixed key double-nests to extensions.extensions.issueRaw, which
+        #      the next stage's `extensions.issueRaw` then can't find. Expressions
+        #      and TriggerBinding refs, by contrast, DO use the extensions. prefix.
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >-
+                body.object_attributes.noteable_type == 'Issue' &&
+                body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
+                body.object_attributes.note.startsWith('/remediate')
+            - name: overlays
+              value:
+                # Raw decision text from the issue body's <!-- cve-decision ... --> marker.
+                - key: issueRaw
+                  expression: >-
+                    (has(body.issue) && has(body.issue.description) && body.issue.description != null && size(body.issue.description.split("<!-- cve-decision")) > 1) ? body.issue.description.split("<!-- cve-decision")[1].split("-->")[0] : ""
+                # Raw override text from the comment: everything after the
+                # LEADING /remediate. substring(10), not split("/remediate")[1]
+                # -- split breaks a valid override whose field VALUE contains
+                # the command again (e.g. a JUSTIFICATION mentioning
+                # /remediate), truncating the JSON/YAML mid-value.
+                - key: commentRaw
+                  expression: >-
+                    body.object_attributes.note.startsWith('/remediate') ? body.object_attributes.note.substring(10) : ""
+        # (b) Parse both raw blocks into maps (parseYAML also accepts JSON). Skip
+        #     parsing when there's no "key: value" content, to avoid errors on empty
+        #     text. Reads extensions.issueRaw / commentRaw from the previous stage.
+        - ref:
+            name: cel
+          params:
+            - name: overlays
+              value:
+                - key: issueMap
+                  expression: >-
+                    extensions.issueRaw.contains(":") ? extensions.issueRaw.parseYAML() : {}
+                - key: commentMap
+                  expression: >-
+                    extensions.commentRaw.contains(":") ? extensions.commentRaw.parseYAML() : {}
+        # (c) Merge each field (comment > issue > default) and derive SCM coordinates.
+        #     Reads extensions.issueMap / commentMap from the previous stage.
+        - ref:
+            name: cel
+          params:
+            - name: overlays
+              value:
+                - key: SELECTED
+                  expression: >-
+                    ("SELECTED" in extensions.commentMap) ? string(extensions.commentMap["SELECTED"]) : (("SELECTED" in extensions.issueMap) ? string(extensions.issueMap["SELECTED"]) : "1")
+                - key: CVE_ID
+                  expression: >-
+                    ("CVE_ID" in extensions.commentMap) ? string(extensions.commentMap["CVE_ID"]) : (("CVE_ID" in extensions.issueMap) ? string(extensions.issueMap["CVE_ID"]) : "")
+                - key: PACKAGE
+                  expression: >-
+                    ("PACKAGE" in extensions.commentMap) ? string(extensions.commentMap["PACKAGE"]) : (("PACKAGE" in extensions.issueMap) ? string(extensions.issueMap["PACKAGE"]) : "")
+                - key: CURRENT_VERSION
+                  expression: >-
+                    ("CURRENT_VERSION" in extensions.commentMap) ? string(extensions.commentMap["CURRENT_VERSION"]) : (("CURRENT_VERSION" in extensions.issueMap) ? string(extensions.issueMap["CURRENT_VERSION"]) : "")
+                - key: FIXED_VERSION
+                  expression: >-
+                    ("FIXED_VERSION" in extensions.commentMap) ? string(extensions.commentMap["FIXED_VERSION"]) : (("FIXED_VERSION" in extensions.issueMap) ? string(extensions.issueMap["FIXED_VERSION"]) : "")
+                - key: JUSTIFICATION
+                  expression: >-
+                    ("JUSTIFICATION" in extensions.commentMap) ? string(extensions.commentMap["JUSTIFICATION"]) : (("JUSTIFICATION" in extensions.issueMap) ? string(extensions.issueMap["JUSTIFICATION"]) : "")
+                # SCM coordinates derived from the payload.
+                - key: git_host
+                  expression: >-
+                    body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
+                - key: base_branch
+                  expression: >-
+                    (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
+                # The commented-on issue's project-scoped number (iid), as a string,
+                # so the opened MR can link back to it. Falls back to "" if absent.
+                - key: issue_iid
+                  expression: >-
+                    (has(body.issue) && has(body.issue.iid) && body.issue.iid != null) ? string(body.issue.iid) : ""
+      bindings:
+        - ref: cve-remediation-issue-binding
+      template:
+        ref: cve-remediation-issue-template
+    - name: gitlab-issue-generate-tests-unit
+      interceptors:
+        # 1) Validate the shared secret token and that this is a comment event.
+        - ref:
+            name: gitlab
+          params:
+            - name: secretRef
+              value:
+                secretName: gitlab-webhook-secret
+                secretKey: secretToken
+            - name: eventTypes
+              value:
+                - "Note Hook"
+        # 2) Only act on issue comments beginning with /generate-tests-unit,
+        #    and derive the SCM coordinates. Both overlays read only `body`,
+        #    so ONE cel interceptor suffices -- unlike /remediate, nothing
+        #    here depends on an extension set by a sibling overlay (see the
+        #    chaining gotcha above). Overlay keys are BARE (key: git_host),
+        #    not extensions.-prefixed.
+        #
+        #    All three /generate-tests-* commands use a plain startsWith on
+        #    their full command name -- every command name is unique, so no
+        #    word-boundary regex is needed. (This trigger was previously the
+        #    bare /generate-tests with a word-boundary regex, whose \s escape
+        #    broke the CEL parser outright: CEL string literals have no \s,
+        #    so the filter failed to parse and the command silently never
+        #    fired. Keep backslash escapes out of cel filters.)
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >-
+                body.object_attributes.noteable_type == 'Issue' &&
+                body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
+                body.object_attributes.note.startsWith('/generate-tests-unit')
+            - name: overlays
+              value:
+                - key: git_host
+                  expression: >-
+                    body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
+                - key: base_branch
+                  expression: >-
+                    (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
+                # The commented-on issue's project-scoped number (iid), as a string,
+                # so the opened MR can link back to it. Falls back to "" if absent.
+                - key: issue_iid
+                  expression: >-
+                    (has(body.issue) && has(body.issue.iid) && body.issue.iid != null) ? string(body.issue.iid) : ""
+      bindings:
+        - ref: test-generation-issue-binding
+      template:
+        ref: test-generation-unit-issue-template
+    - name: gitlab-issue-generate-tests-functional
+      interceptors:
+        # 1) Validate the shared secret token and that this is a comment event.
+        - ref:
+            name: gitlab
+          params:
+            - name: secretRef
+              value:
+                secretName: gitlab-webhook-secret
+                secretKey: secretToken
+            - name: eventTypes
+              value:
+                - "Note Hook"
+        # 2) Only act on issue comments beginning with /generate-tests-functional
+        #    (every /generate-tests-* command name is unique, so startsWith is
+        #    unambiguous), and derive the SCM coordinates. Same
+        #    single-cel-interceptor structure as gitlab-issue-generate-tests-unit
+        #    above.
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >-
+                body.object_attributes.noteable_type == 'Issue' &&
+                body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
+                body.object_attributes.note.startsWith('/generate-tests-functional')
+            - name: overlays
+              value:
+                - key: git_host
+                  expression: >-
+                    body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
+                - key: base_branch
+                  expression: >-
+                    (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
+                # The commented-on issue's project-scoped number (iid), as a string,
+                # so the opened MR can link back to it. Falls back to "" if absent.
+                - key: issue_iid
+                  expression: >-
+                    (has(body.issue) && has(body.issue.iid) && body.issue.iid != null) ? string(body.issue.iid) : ""
+      bindings:
+        - ref: test-generation-issue-binding
+      template:
+        ref: test-generation-functional-issue-template
+    - name: gitlab-issue-generate-tests-integration
+      interceptors:
+        # 1) Validate the shared secret token and that this is a comment event.
+        - ref:
+            name: gitlab
+          params:
+            - name: secretRef
+              value:
+                secretName: gitlab-webhook-secret
+                secretKey: secretToken
+            - name: eventTypes
+              value:
+                - "Note Hook"
+        # 2) Only act on issue comments beginning with /generate-tests-integration
+        #    (every /generate-tests-* command name is unique, so startsWith is
+        #    unambiguous), and derive the SCM coordinates. Same
+        #    single-cel-interceptor structure as gitlab-issue-generate-tests-unit
+        #    above.
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: >-
+                body.object_attributes.noteable_type == 'Issue' &&
+                body.object_attributes.system == false &&
+                (body.user.username in ['root'] || body.user.username.startsWith('project_')) &&
+                body.object_attributes.note.startsWith('/generate-tests-integration')
+            - name: overlays
+              value:
+                - key: git_host
+                  expression: >-
+                    body.project.git_http_url.parseURL().host
+                # Per-repository SCM credential: map the event's project to
+                # its own token Secret (see the header note). Extend the
+                # mapping when adding an application repository.
+                - key: scm_secret
+                  expression: >-
+                    body.project.path_with_namespace.endsWith('lightwell-java-demo-app') ? 'scm-auth-lightwell-secret' : 'scm-auth-secret'
+                - key: base_branch
+                  expression: >-
+                    (has(body.project.default_branch) && body.project.default_branch != null) ? body.project.default_branch : "main"
+                # The commented-on issue's project-scoped number (iid), as a string,
+                # so the opened MR can link back to it. Falls back to "" if absent.
+                - key: issue_iid
+                  expression: >-
+                    (has(body.issue) && has(body.issue.iid) && body.issue.iid != null) ? string(body.issue.iid) : ""
+      bindings:
+        - ref: test-generation-issue-binding
+      template:
+        ref: test-generation-integration-issue-template
+---
+# Expose the EventListener so GitLab can reach it. The GitLab seeding job
+# creates a Note Hook webhook on each application repository pointing at
+# this Route's https:// host, with the gitlab-webhook-secret token.
+# (OpenShift-specific; drop if you expose it another way.)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: agentic-issue-commands
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+spec:
+  to:
+    kind: Service
+    name: el-agentic-issue-commands
+  port:
+    targetPort: http-listener
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

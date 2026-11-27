@@ -151,13 +151,17 @@ components:
   # The Tekton layer itself: Tasks and the AI/agent-skills ConfigMaps, synced
   # as PLAIN YAML from pipelines/ at the repo root. The Pipelines under
   # pipelines/pipelines/ are also synced (wave 5, see tekton-pipelines below)
-  # because the PaC PipelineRuns reference them by pipelineRef.
+  # because the PaC PipelineRuns reference them by pipelineRef. The
+  # issue-comment EventListener under pipelines/triggers/ (wave 5, see
+  # tekton-triggers) handles the /remediate and /generate-tests-* slash
+  # commands PaC cannot match.
   tekton:
     enabled: true
     syncWaves:
       tasks: "4"
       config: "4"
       pipelines: "5"
+      triggers: "5"
     # pipelines/config/rhtpa-enable-importers-job.yaml is redundant on a
     # GitOps install (the RHTPA Application declares the importer) and needs
     # the hand-made tpa-secret, so it stays excluded.
@@ -230,6 +234,14 @@ components:
       bucket: trustify
       # Empty derives https://s3-openshift-storage.<domain>:443
       regionEndpoint: ""
+
+  # Operational jobs that run after the platform is up:
+  #   * Lightwell data loading into RHTPA (the .rhlw-* backports)
+  #   * Agent image pre-warming (DaemonSet)
+  #   * Ad-hoc upload tooling (ConfigMap)
+  ops:
+    enabled: true
+    syncWave: "16"
 
   # The example application's dev/qa/prod environments — the consumer end of
   # the CD chain. Wave 16, AFTER everything else, deliberately: each

@@ -1,0 +1,47 @@
+{{- $ns := .Values.pipelineNamespace }}
+{{- $store := .Values.vault.secretStoreName | default "vault-cluster" }}
+{{- $prefix := .Values.vault.pathPrefix | default "tssc-validated-pattern" }}
+# -----------------------------------------------------------------------------
+# The Lightwell data loading Job. Uploads OSV advisories and catalog SBOMs
+# into RHTPA so the `.rhlw-*` backports are known and marked `fixed`. Without
+# this the demo runs but the AI has no recommended backport to suggest.
+#
+# Idempotent: the script checks each entry before uploading, so re-running
+# (every Argo sync via Replace/Force) is safe.
+#
+# The data comes from ConfigMaps rendered from data/ at the repo root — the
+# same files the RUNBOOK's manual script used, now part of the install.
+#
+# Wave: after rhtpa-operator (15) and app-environments (16) — RHTPA must be
+# serving before the Job starts.
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightwell-data-osv
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+data:
+{{- range $file, $content := .Files.Glob "files/data/osv/*.json" }}
+  {{ base $file }}: |-
+{{ $content | toString | indent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightwell-data-sbom
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ops.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.syncWave | quote }}
+data:
+{{- range $file, $content := .Files.Glob "files/data/sbom/*.cdx.json" }}
+  {{ base $file }}: |-
+{{ $content | toString | indent 4 }}
+{{- end }}

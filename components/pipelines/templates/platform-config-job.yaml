@@ -34,6 +34,17 @@ data:
     #      8Gi here, before the heavy waves (gitlab 8, quay/rhtpa 10) start.
     #      Only ever RAISES the limit -- a deliberately higher value is left
     #      alone.
+    #   4. TektonConfig spec.platforms.openshift.pipelinesAsCode.settings
+    #      .remote-tasks = "false" -- PaC's resolver (v0.50.x) resolves every
+    #      bare pipelineRef/taskRef a .tekton PipelineRun carries ONLY from
+    #      YAML in the same .tekton/ directory or from remote-pipeline/task
+    #      annotations; there is no cluster-resource fallback, so a
+    #      pipelineRef to an Argo-installed Pipeline fails with "cannot find
+    #      referenced pipeline". Disabling remote-tasks skips that resolution
+    #      entirely: PaC creates the PipelineRun verbatim and the Tekton
+    #      controllers resolve the refs against the cluster -- which is
+    #      exactly this demo's model (Pipelines and Tasks centrally synced
+    #      under pipelines/, thin .tekton files in the app repos).
     #
     # Why a Job rather than plain manifests: both CRs are operator-owned,
     # cluster-scoped and heavily defaulted. Argo owning the whole object would
@@ -156,6 +167,32 @@ data:
                 sys.exit("ERROR: patching Argocd/%s: %s %s" % (argocd_name, st, err))
             print("argocd controller memory: %s -> %s"
                   % (current if current else "<operator default>", target))
+
+    # ---- 4. PaC remote-tasks resolution off ---------------------------------
+    # See the header note: with remote-tasks on (the operator default), PaC
+    # refuses a .tekton PipelineRun whose pipelineRef points at a
+    # cluster-installed Pipeline. Empty PAC_REMOTE_TASKS skips the step
+    # (leave the operator default alone).
+    if os.environ.get("PAC_REMOTE_TASKS", "") == "":
+        print("pac remote-tasks: disabled by values, skipping")
+    else:
+        st, cfg = call("/apis/operator.tekton.dev/v1alpha1/tektonconfigs/config")
+        if st != 200:
+            sys.exit("ERROR: reading TektonConfig/config: %s %s" % (st, cfg))
+        settings = ((((cfg.get("spec") or {}).get("platforms") or {})
+                     .get("openshift") or {}).get("pipelinesAsCode") or {}).get("settings") or {}
+        current = settings.get("remote-tasks")
+        if current == os.environ["PAC_REMOTE_TASKS"]:
+            print("pac remote-tasks: already %r" % current)
+        else:
+            st, err = call("/apis/operator.tekton.dev/v1alpha1/tektonconfigs/config",
+                           "PATCH",
+                           {"spec": {"platforms": {"openshift": {"pipelinesAsCode": {
+                               "settings": {"remote-tasks": os.environ["PAC_REMOTE_TASKS"]}}}}}},
+                           "application/merge-patch+json")
+            if st != 200:
+                sys.exit("ERROR: patching TektonConfig remote-tasks: %s %s" % (st, err))
+            print("pac remote-tasks: %r -> %r" % (current, os.environ["PAC_REMOTE_TASKS"]))
 
     print("OK: platform defaults applied")
 ---
@@ -294,6 +331,12 @@ spec:
               {{- end }}
             - name: ARGOCD_CONTROLLER_MEMORY_REQUEST
               value: {{ .Values.platformDefaults.argocdController.memoryRequest | quote }}
+            - name: PAC_REMOTE_TASKS
+              {{- if .Values.platformDefaults.pacRemoteTasks }}
+              value: {{ .Values.platformDefaults.pacRemoteTasks | quote }}
+              {{- else }}
+              value: ""
+              {{- end }}
           command: ["python3", "-I", "/scripts/bootstrap.py"]
           volumeMounts:
             - {name: scripts, mountPath: /scripts}
