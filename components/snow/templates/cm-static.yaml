@@ -19,5 +19,10 @@ data:
 {{ .Files.Get "files/snow-mock/static/app.js" | indent 4 }}
   styles.css: |
 {{ .Files.Get "files/snow-mock/static/styles.css" | indent 4 }}
+  # Vendored chart.js (4.4.9 UMD) instead of the CDN <script>: the UI then
+  # needs no internet egress and no third party can change code running on
+  # the UI's origin with the user's Basic credentials.
+  chart.umd.min.js: |
+{{ .Files.Get "files/snow-mock/static/chart.umd.min.js" | indent 4 }}
 binaryData:
   snow.png: {{ .Files.Get "files/snow-mock/static/snow.png" | b64enc | quote }}

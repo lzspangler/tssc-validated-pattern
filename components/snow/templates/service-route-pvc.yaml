@@ -9,7 +9,13 @@ metadata:
     app: snow-mock
     app.kubernetes.io/part-of: tssc-validated-pattern
   annotations:
-    argocd.argoproj.io/sync-wave: "-1"
+    # Wave 1, WITH its consuming Deployment (the workshop's own placement).
+    # A wave -1 PVC with a WaitForFirstConsumer default StorageClass stays
+    # Pending until a pod mounts it; Argo scores Pending PVCs as
+    # Progressing and would never admit the wave-1 Deployment -- a
+    # wave-deadlocked install (the same class as the external-secrets
+    # InstallPlan cycle).
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   accessModes:
     - ReadWriteOnce

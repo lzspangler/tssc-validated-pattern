@@ -12,6 +12,14 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   replicas: 1
+  # Recreate, NOT the default RollingUpdate: with one replica a rolling
+  # update can briefly run two pods, both mounting the RWO state PVC. The
+  # new pod would load state.json before the old pod's final persist and
+  # could then overwrite the file without the old pod's last incidents.
+  # (Also: two pods on one node cannot both mount a ReadWriteOnce claim --
+  # the replacement would stick Pending.)
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: snow-mock
@@ -21,8 +29,10 @@ spec:
         app: snow-mock
       annotations:
         # Roll the pod when the vendored code or static bundle changes.
-        checksum/code: {{ .Files.Get "files/snow-mock/app.py" | sha256sum }}
-        checksum/static: {{ printf "%s%s%s%s" (.Files.Get "files/snow-mock/static/app.js") (.Files.Get "files/snow-mock/static/index.html") (.Files.Get "files/snow-mock/static/styles.css") (.Files.Get "files/snow-mock/static/snow.png") | sha256sum }}
+        # requirements.txt is included: a dependency-only change must also
+        # restart the pod -- its subPath mount does not live-update.
+        checksum/code: {{ printf "%s%s" (.Files.Get "files/snow-mock/app.py") (.Files.Get "files/snow-mock/requirements.txt") | sha256sum }}
+        checksum/static: {{ printf "%s%s%s%s%s" (.Files.Get "files/snow-mock/static/app.js") (.Files.Get "files/snow-mock/static/index.html") (.Files.Get "files/snow-mock/static/styles.css") (.Files.Get "files/snow-mock/static/snow.png") (.Files.Get "files/snow-mock/static/chart.umd.min.js") | sha256sum }}
     spec:
       containers:
       - name: snow-mock

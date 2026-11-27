@@ -4,8 +4,21 @@ import json
 import datetime
 import base64
 import hmac
+import threading
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
+
+
+# --- response hardening (tssc-validated-pattern deployment) -----------------
+# The UI is served on a public route and has state-changing actions; deny
+# framing and sniffing on every response. setdefault so a future explicit
+# CSP from upstream would win.
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault('X-Frame-Options', 'DENY')
+    resp.headers.setdefault('Content-Security-Policy', "frame-ancestors 'none'")
+    resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    return resp
 
 DEMO_USER_NAME = os.environ.get('DEMO_USER_NAME', 'Demo User')
 
@@ -37,8 +50,12 @@ def _require_basic_auth():
             user, _, password = decoded.partition(':')
         except Exception:
             user = password = None
-        if user is not None and hmac.compare_digest(user, SNOW_AUTH_USER) \
-                and hmac.compare_digest(password, SNOW_AUTH_PASSWORD):
+        # Compare UTF-8 BYTES: with two str arguments compare_digest
+        # requires ASCII-only and raises TypeError on a non-ASCII username
+        # or password, turning a should-be-401 into a 500.
+        if user is not None \
+                and hmac.compare_digest(user.encode('utf-8'), SNOW_AUTH_USER.encode('utf-8')) \
+                and hmac.compare_digest(password.encode('utf-8'), SNOW_AUTH_PASSWORD.encode('utf-8')):
             return None
     return Response('Authentication required\n', 401,
                     {'WWW-Authenticate': 'Basic realm="snow"'})
@@ -697,17 +714,32 @@ _comment_seq = 0
 # runs exactly as before, just without surviving a restart.
 STATE_FILE = os.environ.get("SNOW_STATE_FILE", "")
 
+# gunicorn runs --workers 1 --threads 4, so request threads share
+# incidents_db / comments_db / requests_db / _comment_seq. Every mutation
+# and every persistence write runs under this lock, and readers snapshot
+# through _snapshot() so json.dump and list(...) never iterate a dict
+# another thread is mutating. RLock because mutation paths call
+# _persist() and _append_comment(), which take it again.
+_state_lock = threading.RLock()
+
+
+def _snapshot(db):
+    """Copy a shared dict's values under the state lock."""
+    with _state_lock:
+        return list(db.values())
+
 
 def _persist():
     if not STATE_FILE:
         return
     try:
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"incidents": incidents_db,
-                       "comments": comments_db,
-                       "comment_seq": _comment_seq}, f)
-        os.replace(tmp, STATE_FILE)  # atomic, so a crash cannot truncate it
+        with _state_lock:
+            tmp = STATE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"incidents": incidents_db,
+                           "comments": comments_db,
+                           "comment_seq": _comment_seq}, f)
+            os.replace(tmp, STATE_FILE)  # atomic, so a crash cannot truncate it
     except OSError as exc:
         app.logger.warning("could not persist state to %s: %s", STATE_FILE, exc)
 
@@ -739,22 +771,23 @@ def _next_comment_id():
 
 def _append_comment(incident_number, body, created_by="api_user", comment_type="additional_comments"):
     """Persist a comment and bump the parent incident's updated_on."""
-    key = incident_number.upper()
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    comment = {
-        "sys_id": _next_comment_id(),
-        "element_id": key,
-        "created_on": now_iso,
-        "created_by": created_by,
-        "body": body,
-        "type": comment_type,
-    }
-    comments_db.setdefault(key, []).append(comment)
-    if key in incidents_db:
-        incidents_db[key]["updated_on"] = now_iso
-        incidents_db[key]["updated_by"] = created_by
-    _persist()
-    return comment
+    with _state_lock:
+        key = incident_number.upper()
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        comment = {
+            "sys_id": _next_comment_id(),
+            "element_id": key,
+            "created_on": now_iso,
+            "created_by": created_by,
+            "body": body,
+            "type": comment_type,
+        }
+        comments_db.setdefault(key, []).append(comment)
+        if key in incidents_db:
+            incidents_db[key]["updated_on"] = now_iso
+            incidents_db[key]["updated_by"] = created_by
+        _persist()
+        return comment
 
 
 # Load any state left by a previous pod before serving.
@@ -786,7 +819,7 @@ def get_incident_stats():
     seven_days_ago = now - datetime.timedelta(days=7)
     thirty_days_ago = now - datetime.timedelta(days=30)
 
-    all_incidents = list(incidents_db.values())
+    all_incidents = _snapshot(incidents_db)
     open_incidents = [i for i in all_incidents if i['state'].lower() in OPEN_STATES]
 
     opened_today = [i for i in all_incidents
@@ -842,7 +875,7 @@ def get_incidents():
     limit = int(query_params.get('limit', 100))
     offset = int(query_params.get('offset', 0))
 
-    filtered = list(incidents_db.values())
+    filtered = _snapshot(incidents_db)
 
     if 'state' in query_params:
         states = [s.strip().lower() for s in query_params['state'].split(',')]
@@ -964,6 +997,14 @@ def create_incident():
     if 'description' not in request.json:
         return jsonify({"error": "Missing required field: description"}), 400
 
+    # The whole number-allocation-through-insert section runs under the
+    # state lock: two concurrent POSTs would otherwise read the same max
+    # number and the second insert would silently overwrite the first.
+    with _state_lock:
+        return _create_incident_locked()
+
+
+def _create_incident_locked():
     new_number = get_next_number("INC", incidents_db.keys())
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -1037,25 +1078,28 @@ def update_incident(incident_number):
         if jk in request.json and request.json[jk]:
             journal[jk] = request.json[jk]
 
-    immutable = {"number", "opened_at", "caller_id", "sys_created_on", "comments"}
-    for k, v in request.json.items():
-        if k not in immutable and k not in ("additional_comments", "work_notes", "comment"):
-            inc[k] = v
+    # Mutate + persist atomically: a concurrent reader snapshotting or a
+    # concurrent writer persisting mid-update would otherwise race.
+    with _state_lock:
+        immutable = {"number", "opened_at", "caller_id", "sys_created_on", "comments"}
+        for k, v in request.json.items():
+            if k not in immutable and k not in ("additional_comments", "work_notes", "comment"):
+                inc[k] = v
 
-    for jk, text in journal.items():
-        ctype = "work_notes" if jk == "work_notes" else "additional_comments"
-        _append_comment(key, str(text).strip(), created_by="api_user_update", comment_type=ctype)
+        for jk, text in journal.items():
+            ctype = "work_notes" if jk == "work_notes" else "additional_comments"
+            _append_comment(key, str(text).strip(), created_by="api_user_update", comment_type=ctype)
 
-    inc["updated_on"] = now_iso
-    inc["updated_by"] = "api_user_update"
+        inc["updated_on"] = now_iso
+        inc["updated_by"] = "api_user_update"
 
-    if inc.get("state", "").lower() in ["resolved", "closed"]:
-        inc.setdefault("closed_at", now_iso)
-        inc.setdefault("resolution_notes", "Resolved via API.")
-        inc.setdefault("resolution_code", "Solved")
-        inc.setdefault("resolved_by", "api_user_resolve")
+        if inc.get("state", "").lower() in ["resolved", "closed"]:
+            inc.setdefault("closed_at", now_iso)
+            inc.setdefault("resolution_notes", "Resolved via API.")
+            inc.setdefault("resolution_code", "Solved")
+            inc.setdefault("resolved_by", "api_user_resolve")
 
-    _persist()
+        _persist()
     result = dict(inc)
     result["comments"] = list(comments_db.get(key, []))
     return jsonify({"result": result})
@@ -1068,7 +1112,7 @@ def get_service_requests():
     limit = int(query_params.get('limit', 10))
     offset = int(query_params.get('offset', 0))
 
-    filtered = list(requests_db.values())
+    filtered = _snapshot(requests_db)
 
     if 'state' in query_params:
         filtered = [r for r in filtered if r.get('state', '').lower() == query_params['state'].lower()]
@@ -1098,6 +1142,11 @@ def create_service_request():
     if not request.json or 'short_description' not in request.json or 'requested_for' not in request.json:
         return jsonify({"error": "Missing required fields: short_description, requested_for"}), 400
 
+    with _state_lock:
+        return _create_service_request_locked()
+
+
+def _create_service_request_locked():
     new_number = get_next_number("REQ", requests_db.keys())
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 

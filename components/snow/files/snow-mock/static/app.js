@@ -30,6 +30,19 @@ function escapeHtml(str) {
 }
 
 /**
+ * Attribute-safe escape. escapeHtml (textContent -> innerHTML) escapes & < >
+ * but NOT quotes, so its output cannot be interpolated into double-quoted
+ * attributes: a value like `" autofocus onfocus="alert(1)` in
+ * short_description or caller_id would close the attribute and attach an
+ * event handler. Use escapeAttr for every attribute context (value="",
+ * href="", data-*); keep escapeHtml for element content.
+ */
+function escapeAttr(str) {
+    if (!str) return '';
+    return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
  * Lightweight Markdown + autolink for journal comments (demo UI).
  * Escape-first so raw HTML in bodies cannot execute; then apply a small
  * subset: headings, lists, hr, **bold**, *italic*, `code`, [text](url),
@@ -114,7 +127,7 @@ function formatInlineMd(text) {
         const safeHref = sanitizeUrl(href);
         if (!safeHref) return label;
         return stash(
-            `<a class="sn-md-link" href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`
+            `<a class="sn-md-link" href="${escapeAttr(safeHref)}" target="_blank" rel="noopener noreferrer">${label}</a>`
         );
     });
 
@@ -132,7 +145,7 @@ function formatInlineMd(text) {
         const safeHref = sanitizeUrl(url);
         if (!safeHref) return match;
         return stash(
-            `<a class="sn-md-link" href="${safeHref}" target="_blank" rel="noopener noreferrer">${url}</a>`
+            `<a class="sn-md-link" href="${escapeAttr(safeHref)}" target="_blank" rel="noopener noreferrer">${url}</a>`
         ) + trail;
     });
 
@@ -352,7 +365,7 @@ async function loadList(params) {
         tr.innerHTML = `
             <td><input type="checkbox"></td>
             <td></td>
-            <td><a class="sn-link" href="#incidents/${escapeHtml(inc.number)}">${escapeHtml(inc.number)}</a></td>
+            <td><a class="sn-link" href="#incidents/${escapeAttr(inc.number)}">${escapeHtml(inc.number)}</a></td>
             <td>${formatDatetime(inc.opened_at)}</td>
             <td>${escapeHtml(inc.short_description)}</td>
             <td>${escapeHtml(inc.state)}</td>
@@ -386,13 +399,13 @@ async function loadDetail(number) {
                 <div class="sn-form-row">
                     <span class="sn-form-label">Number</span>
                     <div class="sn-form-value">
-                        <input type="text" class="sn-form-input sn-form-input-readonly" value="${escapeHtml(inc.number)}" readonly>
+                        <input type="text" class="sn-form-input sn-form-input-readonly" value="${escapeAttr(inc.number)}" readonly>
                     </div>
                 </div>
                 <div class="sn-form-row">
                     <span class="sn-form-label">Caller</span>
                     <div class="sn-form-value" style="display:flex;align-items:center;gap:4px;">
-                        <input type="text" class="sn-form-input" value="${escapeHtml(userName)}" readonly>
+                        <input type="text" class="sn-form-input" value="${escapeAttr(userName)}" readonly>
                         <button class="sn-form-search-btn">&#128269;</button>
                         <button class="sn-form-icon-btn" title="View">&#128100;</button>
                         <button class="sn-form-icon-btn" title="Info">&#9432;</button>
@@ -493,7 +506,7 @@ async function loadDetail(number) {
                 <div class="sn-form-row">
                     <span class="sn-form-label">Short description</span>
                     <div class="sn-form-value" style="display:flex;align-items:center;gap:4px;">
-                        <input type="text" class="sn-form-input" value="${escapeHtml(inc.short_description)}" readonly>
+                        <input type="text" class="sn-form-input" value="${escapeAttr(inc.short_description)}" readonly>
                         <button class="sn-form-icon-btn" title="AI">&#128161;</button>
                     </div>
                 </div>
@@ -502,7 +515,7 @@ async function loadDetail(number) {
                 <div class="sn-form-row">
                     <span class="sn-form-label">Parent incident</span>
                     <div class="sn-form-value">
-                        <input type="text" class="sn-form-input" value="${escapeHtml(inc.parent_incident || '')}" readonly placeholder="—">
+                        <input type="text" class="sn-form-input" value="${escapeAttr(inc.parent_incident || '')}" readonly placeholder="—">
                     </div>
                 </div>
             </div>
@@ -510,7 +523,7 @@ async function loadDetail(number) {
                 <div class="sn-form-row">
                     <span class="sn-form-label">Child incidents</span>
                     <div class="sn-form-value">
-                        <input type="text" class="sn-form-input" value="${escapeHtml((inc.child_incidents || []).join(', '))}" readonly placeholder="—">
+                        <input type="text" class="sn-form-input" value="${escapeAttr((inc.child_incidents || []).join(', '))}" readonly placeholder="—">
                     </div>
                 </div>
             </div>
@@ -535,7 +548,7 @@ async function loadDetail(number) {
             <div style="flex:1;">
                 <textarea id="newCommentBody" class="sn-form-textarea" placeholder="Additional comments (Customer visible)"></textarea>
                 <div style="text-align:right;margin-top:6px;">
-                    <button id="postCommentBtn" class="sn-btn sn-btn-outline" data-incident="${escapeHtml(inc.number)}">Post</button>
+                    <button id="postCommentBtn" class="sn-btn sn-btn-outline" data-incident="${escapeAttr(inc.number)}">Post</button>
                 </div>
             </div>
         </div>

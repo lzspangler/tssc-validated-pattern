@@ -19,6 +19,11 @@ spec:
     path: {{ .Values.gitops.componentsPath }}/snow
     helm:
       valuesObject:
+        # Forward the configured namespace: the chart creates the Namespace
+        # object and deploys every resource from .Values.namespace, so
+        # without this a non-default components.snow.namespace would split
+        # the app across two namespaces.
+        namespace: {{ $s.namespace | quote }}
         cluster:
           subdomain: {{ .Values.deployer.domain | quote }}
         vault:
