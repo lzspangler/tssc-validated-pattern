@@ -1,0 +1,32 @@
+{{- if .Values.components.snow.enabled }}
+{{- $s := .Values.components.snow }}
+# -----------------------------------------------------------------------------
+# snow-mock: the ServiceNow ITSM simulator (vendored from the
+# lightwell-workshop) plus the Job that registers the example applications
+# on its board. See components/snow for what it adds over the workshop
+# deployment (Basic auth from Vault; application registration).
+# Deliberately NO Automation Orchestrator ticket integration.
+# -----------------------------------------------------------------------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+{{ include "bootstrap.metadata" (dict "name" "snow" "namespace" .Values.argocd.namespace "syncWave" $s.syncWave "root" .) }}
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ .Values.gitops.revision }}
+    path: {{ .Values.gitops.componentsPath }}/snow
+    helm:
+      valuesObject:
+        cluster:
+          subdomain: {{ .Values.deployer.domain | quote }}
+        vault:
+          kvMount: {{ .Values.vault.kvMount | quote }}
+          pathPrefix: {{ .Values.vault.pathPrefix | quote }}
+          secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $s.namespace }}
+  {{- include "bootstrap.syncPolicy" . | nindent 2 }}
+{{- end }}
