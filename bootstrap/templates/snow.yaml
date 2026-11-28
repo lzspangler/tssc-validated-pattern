@@ -30,6 +30,9 @@ spec:
           kvMount: {{ .Values.vault.kvMount | quote }}
           pathPrefix: {{ .Values.vault.pathPrefix | quote }}
           secretStoreName: {{ .Values.vault.secretStoreName | quote }}
+        pipelineCredentials:
+          enabled: {{ .Values.components.snow.pipelineCredentials | default true }}
+          namespace: {{ .Values.pipelineNamespace | quote }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ $s.namespace }}

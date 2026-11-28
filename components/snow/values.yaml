@@ -62,3 +62,11 @@ vault:
   kvMount: secret
   pathPrefix: tssc-validated-pattern
   secretStoreName: vault-cluster
+
+# Credentials for the pipeline namespace (open-cve-snow-tickets task):
+# copies the snow-mock API username/password into tssc-app-ci as the
+# tssc-snow-api Secret. Set enabled: false when Snow ticket creation
+# should not be wired (the task then skips gracefully).
+pipelineCredentials:
+  enabled: true
+  namespace: tssc-app-ci
