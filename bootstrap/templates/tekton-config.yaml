@@ -19,13 +19,20 @@ spec:
     repoURL: {{ .Values.gitops.repoURL }}
     targetRevision: {{ .Values.gitops.revision }}
     path: {{ .Values.gitops.tektonPath }}/config
+    {{- if not $tk.enableImportersJob }}
+    # NOTE on what is deliberately NOT rendered here: no `recurse: false`
+    # and no `group: ""` in the ignoreDifferences below. The Application
+    # CRD's serialization drops zero-valued fields on write, so rendering
+    # them makes field-content permanently OutOfSync on this child -- the
+    # patch applies, the CRD strips the zero values, the diff returns on
+    # the next refresh (observed on cluster-5b6gt and cluster-bg9cv).
+    # Absent `recurse` already means non-recursive; an absent `group`
+    # already means the core group.
     directory:
-      recurse: false
-      {{- if not $tk.enableImportersJob }}
       # Redundant once the RHTPA Application declares the importer, and it
       # needs the tpa-secret to run at all.
       exclude: rhtpa-enable-importers-job.yaml
-      {{- end }}
+    {{- end }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ $ns }}
@@ -33,8 +40,7 @@ spec:
   # The tekton-cluster-defaults Job owns the cluster-specific values of these
   # ConfigMap keys; ignoring exactly them keeps selfHeal from reverting it.
   ignoreDifferences:
-    - group: ""
-      kind: ConfigMap
+    - kind: ConfigMap
       name: ai-agent-config
       jsonPointers:
         - /data/AI_MODEL

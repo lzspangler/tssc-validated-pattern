@@ -1,0 +1,206 @@
+{{- if .Values.argocd.controllerResources.enabled }}
+{{- $cr := .Values.argocd.controllerResources }}
+{{- $ns := .Values.argocd.namespace }}
+# -----------------------------------------------------------------------------
+# Raise the Argo CD application-controller's memory limit BEFORE any
+# component Application syncs. This is part of field-content's own manifest
+# set: the RBAC and script land at sync-wave -2 and the Job at -1, ahead of
+# the earliest child Application (vault, wave 0). The stock 2Gi controller
+# only has to survive rendering this chart -- a few dozen small manifests --
+# before the limit is raised; every heavyweight sync (tekton layers, gitlab,
+# quay, artifactory) then runs with the raised limit.
+#
+# Why this exists: the patch used to ride the pipelines platform-config Job
+# (wave 3), which was late twice -- cluster-dl265 OOM'd at wave 3, and
+# cluster-5b6gt's controller thrashed from the first hour and its stale
+# health assessments BLOCKED the pipelines Application carrying the patch,
+# deadlocking the install until the limit was raised manually. A patch
+# deployed by an Application cannot save a controller that dies before that
+# Application syncs; putting it in field-content's own earliest wave is the
+# earliest anything in the demo install can act.
+#
+# Only ever raises: a deliberately higher limit (platform-managed) is left
+# alone, so this is idempotent and safe on re-syncs.
+# -----------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-controller-resources
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  patch.py: |
+    import json
+    import os
+    import ssl
+    import sys
+    import urllib.request
+
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    token = open(SA + "/token").read().strip()
+    ctx = ssl.create_default_context(cafile=SA + "/ca.crt")
+    API = "https://%s:%s" % (os.environ["KUBERNETES_SERVICE_HOST"],
+                             os.environ["KUBERNETES_SERVICE_PORT_HTTPS"])
+
+    NS = os.environ["ARGOCD_NAMESPACE"]
+    NAME = os.environ["ARGOCD_NAME"]
+    REQUEST = os.environ["ARGOCD_MEMORY_REQUEST"]
+    LIMIT = os.environ["ARGOCD_MEMORY_LIMIT"]
+
+
+    def call(path, method="GET", body=None):
+        req = urllib.request.Request(API + path, method=method,
+                                     data=json.dumps(body).encode() if body else None,
+                                     headers={"Authorization": "Bearer " + token,
+                                              "Accept": "application/json",
+                                              **({"Content-Type": "application/merge-patch+json"}
+                                                 if body else {})})
+        with urllib.request.urlopen(req, context=ctx) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else None)
+
+
+    def mem_bytes(v):
+        # Kubernetes memory quantity -> bytes (float), or None.
+        # Semantics per the resource API: a BARE number is BYTES (so
+        # "2147483648" is 2Gi, not 2Gi MiB -- misreading it as MiB made
+        # the only-ever-raises check treat a bytes form as astronomically
+        # large and skip a required increase); Ki/Mi/Gi/Ti/Pi/Ei are
+        # binary (1024^n); k/M/G/T/P/E are decimal (1000^n); mantissas
+        # may be fractional ("1.5Gi"). Two-char suffixes are checked
+        # first so "Mi" is not read as M + "i".
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        binary = {"Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3,
+                  "Ti": 1024 ** 4, "Pi": 1024 ** 5, "Ei": 1024 ** 6}
+        decimal = {"k": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9,
+                   "T": 10 ** 12, "P": 10 ** 15, "E": 10 ** 18}
+        for table in (binary, decimal):
+            for suffix, mult in table.items():
+                if s.endswith(suffix):
+                    try:
+                        return float(s[:-len(suffix)]) * mult
+                    except ValueError:
+                        return None
+        try:
+            return float(s)  # bare number: bytes
+        except ValueError:
+            return None
+
+
+    path = "/apis/argoproj.io/v1alpha1/namespaces/%s/argocds/%s" % (NS, NAME)
+    st, acd = call(path)
+    if st != 200:
+        sys.exit("ERROR: reading Argocd/%s: %s %s" % (NAME, st, acd))
+    res = (((acd.get("spec") or {}).get("controller")) or {}).get("resources") or {}
+    current = (res.get("limits") or {}).get("memory")
+    if current is None:
+        # No explicit limit: the operator default. Patch unconditionally.
+        print("argocd controller memory: <operator default> -> %s" % LIMIT)
+    else:
+        cur, tgt = mem_bytes(current), mem_bytes(LIMIT)
+        if cur is None or tgt is None:
+            sys.exit("ERROR: unparseable memory value (current %r, target %r)" % (current, LIMIT))
+        if cur >= tgt:
+            print("argocd controller memory: limit already %s, leaving alone" % current)
+            sys.exit(0)
+        print("argocd controller memory: %s -> %s" % (current, LIMIT))
+
+    st, err = call(path, "PATCH",
+                   {"spec": {"controller": {"resources": {
+                       "requests": {"memory": REQUEST},
+                       "limits": {"memory": LIMIT}}}}})
+    if st != 200:
+        sys.exit("ERROR: patching Argocd/%s: %s %s" % (NAME, st, err))
+    print("argocd controller memory patched")
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-controller-resources
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-controller-resources
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["argocds"]
+    resourceNames: [{{ $cr.name | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-controller-resources
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-controller-resources
+subjects:
+  - kind: ServiceAccount
+    name: argocd-controller-resources
+    namespace: {{ $ns }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: argocd-controller-resources
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: tssc-validated-pattern
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    # Replace+Force (required together for Jobs): the pod template is
+    # immutable, and re-syncs re-run the patch -- which only ever raises,
+    # so that is safe and intended.
+    argocd.argoproj.io/sync-options: Replace=true,Force=true
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: argocd-controller-resources
+      containers:
+      - name: patch
+        image: registry.access.redhat.com/ubi9/python-311:latest
+        command: ["python3", "-I", "/scripts/patch.py"]
+        env:
+        - name: ARGOCD_NAMESPACE
+          value: {{ $ns | quote }}
+        - name: ARGOCD_NAME
+          value: {{ $cr.name | quote }}
+        - name: ARGOCD_MEMORY_REQUEST
+          value: {{ $cr.memoryRequest | quote }}
+        - name: ARGOCD_MEMORY_LIMIT
+          value: {{ $cr.memoryLimit | quote }}
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+      volumes:
+      - name: script
+        configMap:
+          name: argocd-controller-resources
+{{- end }}
