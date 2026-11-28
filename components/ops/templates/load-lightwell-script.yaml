@@ -30,13 +30,8 @@ data:
     if not RHTPA or not ISSUER or not CLIENT_SECRET:
         sys.exit("ERROR: TPA_URL, OIDC_ISSUER_URL and OIDC_CLIENT_SECRET must be set")
 
-    # TLS verification disabled: the script talks to in-cluster Routes
-    # (RHTPA, Keycloak) whose serving certs are signed by the cluster's
-    # internal CA, not a publicly-trusted root. For a demo this is
-    # acceptable; for production, mount the cluster CA bundle and verify.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    # Use system trust by default; private ingress CAs are mounted explicitly.
+    ctx = ssl.create_default_context(cafile=os.environ.get("INGRESS_CA_BUNDLE") or None)
 
     def req(url, method="GET", data=None, headers=None, form=None):
         if form is not None:
@@ -128,9 +123,9 @@ data:
             sys.exit(1)
 
     # --- verify ----------------------------------------------------------------
-    # Uses the search endpoint (/purl?q=) rather than /purl/base/ or /purl/{id},
-    # because those endpoints return 404 / length errors on this RHTPA version
-    # while the search reliably finds the ingested .rhlw-* PURLs.
+    # Two-step lookup: the search endpoint (/purl?q=) reliably finds the
+    # ingested .rhlw-* PURLs, but its items carry no advisory links; the purl
+    # DETAIL (/purl/{uuid}, with the uuid the search returns) carries them.
     print("\n=== verification ===")
     rc = 0
     V3 = RHTPA + "/api/v3"
@@ -156,19 +151,28 @@ data:
         purl_entry = found[0]
         purl_str = purl_entry.get("purl", "")
 
-        # Check if the version appears in the advisories' statuses
+        # Advisory links live on the purl detail, not on the search items.
+        st, detail = req(V3 + "/purl/" + purl_entry.get("uuid", ""), headers=AUTH)
+        if st != 200 or not detail:
+            print("  [FAIL] detail for %s failed (HTTP %s)" % (purl_str.split("/")[-1][:40], st)); rc = 1; continue
+
+        # Each advisory link carries a status. This RHTPA version uses a flat
+        # string ("fixed"); older ones used a list of {status: ...} objects.
+        # Accept both so the check does not depend on the minor version.
         statuses = set()
-        for adv in (purl_entry.get("advisories") or []):
-            for s2 in (adv.get("status") or []):
-                statuses.add(s2.get("status", ""))
+        for adv in (detail.get("advisories") or []):
+            status = adv.get("status")
+            if isinstance(status, str):
+                statuses.add(status)
+            else:
+                for s2 in (status or []):
+                    statuses.add(s2.get("status", ""))
         if "affected" in statuses:
             print("  [FAIL] %s still has affected status: %s" % (purl_str.split("/")[-1][:40], statuses)); rc = 1
         elif "fixed" in statuses:
             print("  [ok]   %s@%s has fixed status" % (name, expected_version))
-        elif not statuses:
-            print("  [ok]   %s@%s known, no advisory matches (scans clean)" % (name, expected_version))
         else:
-            print("  [ok]   %s@%s known, statuses: %s" % (name, expected_version, statuses))
+            print("  [FAIL] %s@%s lacks the expected fixed advisory status: %s" % (name, expected_version, statuses)); rc = 1
 
     print("\n%s" % ("OK: Lightwell data loaded and verified" if rc == 0 else "FAILURES detected"))
     sys.exit(rc)

@@ -263,6 +263,11 @@ vault:
   pathPrefix: tssc-validated-pattern
   secretStoreName: vault-cluster
 
+# Optional public ingress CA for verified route requests from the seeding
+# Job's populate script (set by bootstrap).
+tls:
+  caConfigMap: ""
+
 # Whether the PaC pipeline definitions ConfigMap is rendered at all (kept in
 # step with the per-repo `pac` blocks above; the chart-level gate exists so
 # a pac-less install renders no ConfigMap either). `issueCommands` gates the
