@@ -125,48 +125,13 @@ data:
             print("console plugins: added pipelines-console-plugin ->", merged)
 
     # ---- 3. Argo CD application-controller memory ---------------------------
-    # The stock openshift-gitops instance limits the controller to 2Gi; this
-    # app-of-apps OOM-kills it during the bootstrap (see the header). Only
-    # ever RAISE: skip when the live limit already meets or exceeds the
-    # target, so a deliberate higher setting survives.
-    def mem_mib(v):
-        if not isinstance(v, str):
-            return None
-        v = v.strip()
-        for suffix, mult in (("Gi", 1024), ("Mi", 1), ("Ki", 1 / 1024)):
-            if v.endswith(suffix):
-                try:
-                    return int(float(v[: -len(suffix)]) * mult)
-                except ValueError:
-                    return None
-        return None
-
-    if os.environ.get("ARGOCD_CONTROLLER_MEMORY", "") == "":
-        print("argocd controller memory: disabled by values, skipping")
-    else:
-        target = os.environ["ARGOCD_CONTROLLER_MEMORY"]
-        argocd_ns = os.environ["ARGOCD_NAMESPACE"]
-        argocd_name = os.environ["ARGOCD_NAME"]
-        path = "/apis/argoproj.io/v1alpha1/namespaces/%s/argocds/%s" % (argocd_ns, argocd_name)
-        st, acd = call(path)
-        if st != 200:
-            sys.exit("ERROR: reading Argocd/%s: %s %s" % (argocd_name, st, acd))
-        res = (((acd.get("spec") or {}).get("controller")) or {}).get("resources") or {}
-        current = ((res.get("limits") or {}).get("memory"))
-        current_mib = mem_mib(current)
-        target_mib = mem_mib(target)
-        if current_mib is not None and target_mib is not None and current_mib >= target_mib:
-            print("argocd controller memory: limit already %s, leaving alone" % current)
-        else:
-            st, err = call(path, "PATCH",
-                           {"spec": {"controller": {"resources": {
-                               "requests": {"memory": os.environ.get("ARGOCD_CONTROLLER_MEMORY_REQUEST", "2Gi")},
-                               "limits": {"memory": target}}}}},
-                           "application/merge-patch+json")
-            if st != 200:
-                sys.exit("ERROR: patching Argocd/%s: %s %s" % (argocd_name, st, err))
-            print("argocd controller memory: %s -> %s"
-                  % (current if current else "<operator default>", target))
+    # REMOVED: this patch moved to bootstrap/templates/
+    # argocd-controller-resources.yaml, which runs at field-content's own
+    # sync-wave -1 -- ahead of every component Application -- after
+    # cluster-5b6gt's controller OOM-thrashed before this wave-3 Job could
+    # run and blocked the install for a day. Keeping a second copy here
+    # meant two values blocks for the same limit; the bootstrap one is the
+    # single source now.
 
     # ---- 4. PaC remote-tasks resolution off ---------------------------------
     # See the header note: with remote-tasks on (the operator default), PaC
@@ -226,44 +191,6 @@ rules:
     resources: ["consoles"]
     verbs: ["get", "patch", "update"]
 {{- end }}
-{{- if .Values.platformDefaults.argocdController.enabled }}
----
-# The Argocd CR is NAMESPACED (unlike the two targets above), so this is a
-# Role in the gitops namespace, bound to the Job's ServiceAccount from
-# openshift-pipelines.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: pipelines-defaults-argocd
-  namespace: {{ .Values.platformDefaults.argocdController.namespace }}
-  labels:
-    {{- include "pipelines.labels" . | nindent 4 }}
-  annotations:
-    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
-rules:
-  - apiGroups: ["argoproj.io"]
-    resources: ["argocds"]
-    resourceNames: [{{ .Values.platformDefaults.argocdController.name | quote }}]
-    verbs: ["get", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: pipelines-defaults-argocd
-  namespace: {{ .Values.platformDefaults.argocdController.namespace }}
-  labels:
-    {{- include "pipelines.labels" . | nindent 4 }}
-  annotations:
-    argocd.argoproj.io/sync-wave: {{ .Values.pipelines.syncWaves.platformConfig | quote }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: pipelines-defaults-argocd
-subjects:
-  - kind: ServiceAccount
-    name: pipelines-defaults
-    namespace: {{ .Values.platformDefaults.namespace }}
-{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -319,18 +246,6 @@ spec:
               value: {{ .Values.platformDefaults.defaultTimeoutMinutes | quote }}
             - name: ENABLE_CONSOLE_PLUGIN
               value: {{ if .Values.platformDefaults.consolePlugin.enabled }}"true"{{ else }}"false"{{ end }}
-            - name: ARGOCD_NAMESPACE
-              value: {{ .Values.platformDefaults.argocdController.namespace | quote }}
-            - name: ARGOCD_NAME
-              value: {{ .Values.platformDefaults.argocdController.name | quote }}
-            - name: ARGOCD_CONTROLLER_MEMORY
-              {{- if .Values.platformDefaults.argocdController.enabled }}
-              value: {{ .Values.platformDefaults.argocdController.memoryLimit | quote }}
-              {{- else }}
-              value: ""
-              {{- end }}
-            - name: ARGOCD_CONTROLLER_MEMORY_REQUEST
-              value: {{ .Values.platformDefaults.argocdController.memoryRequest | quote }}
             - name: PAC_REMOTE_TASKS
               {{- if .Values.platformDefaults.pacRemoteTasks }}
               value: {{ .Values.platformDefaults.pacRemoteTasks | quote }}
