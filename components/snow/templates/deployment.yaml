@@ -32,7 +32,7 @@ spec:
         # requirements.txt is included: a dependency-only change must also
         # restart the pod -- its subPath mount does not live-update.
         checksum/code: {{ printf "%s%s" (.Files.Get "files/snow-mock/app.py") (.Files.Get "files/snow-mock/requirements.txt") | sha256sum }}
-        checksum/static: {{ printf "%s%s%s%s%s" (.Files.Get "files/snow-mock/static/app.js") (.Files.Get "files/snow-mock/static/index.html") (.Files.Get "files/snow-mock/static/styles.css") (.Files.Get "files/snow-mock/static/snow.png") (.Files.Get "files/snow-mock/static/chart.umd.min.js") | sha256sum }}
+        checksum/static: {{ printf "%s%s%s%s" (.Files.Get "files/snow-mock/static/app.js") (.Files.Get "files/snow-mock/static/index.html") (.Files.Get "files/snow-mock/static/styles.css") (.Files.Get "files/snow-mock/static/snow.png") | sha256sum }}
     spec:
       containers:
       - name: snow-mock

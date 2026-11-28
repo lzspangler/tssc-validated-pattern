@@ -5,7 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Snow</title>
     <link rel="stylesheet" href="/static/styles.css">
-    <script src="/static/chart.umd.min.js"></script>
+    <!-- chart.js pinned by exact version with Subresource Integrity:
+         a mutable @4 CDN reference would let a changed file run on the
+         UI's origin with the user's Basic credentials. NOT vendored
+         into the snow-mock-static ConfigMap: at ~207KB the file plus
+         the rest of the bundle pushed the ConfigMap past the 256KB
+         limit on metadata.annotations (Argo's client-side apply
+         stores the whole manifest as last-applied-configuration),
+         and the sync failed with "Too long: may not be more than
+         262144 bytes" on cluster-6vf9b. The pod already needs
+         egress for its pip install, so the CDN is no new dependency. -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"
+            integrity="sha384-b0GXujLkk9eYYSmcSfoyZbfyElGAQnDyY0skCHSG6w3JgTMFnz11ggrTAr7seu9f"
+            crossorigin="anonymous"></script>
 </head>
 <body>
 

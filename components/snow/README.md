@@ -66,3 +66,12 @@ rhpds/lightwell-workshop, with ONE local patch: optional HTTP Basic auth
 unauthenticated behavior; `/api/v1/health` exempt). When pulling a newer
 upstream, re-apply that patch — it lives at the top of `app.py` under a
 clearly marked comment block.
+
+chart.js is NOT vendored: at ~207KB it pushes the static ConfigMap past
+the 256KB `metadata.annotations` limit (Argo's client-side apply stores
+the whole manifest as `last-applied-configuration`; observed failing on
+cluster-6vf9b as "Too long: may not be more than 262144 bytes"). The SPA
+loads it from jsDelivr pinned to an exact version with a Subresource
+Integrity hash in `index.html`; the pod needs egress for its pip install
+anyway. Bump the version by updating the `src`, `integrity` (sha384 of
+the file, base64) and keeping `crossorigin="anonymous"`.

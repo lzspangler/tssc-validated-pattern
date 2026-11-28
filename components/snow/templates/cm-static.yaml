@@ -1,5 +1,9 @@
 {{- $subdomain := required "Set cluster.subdomain" .Values.cluster.subdomain }}
 # The SPA is served by the app from /opt/app/static. snow.png is binary, so
+# chart.js is NOT vendored here: at ~207KB it pushes the ConfigMap past
+# the 256KB metadata.annotations limit (Argo client-side apply stores
+# the whole manifest as last-applied-configuration) -- index.html loads
+# it from the CDN pinned by version with an SRI hash instead.
 # it rides as a ConfigMap binaryData entry (base64 in the manifest, mounted
 # as a file -- the same vendoring trick the workshop chart uses).
 apiVersion: v1
@@ -19,10 +23,5 @@ data:
 {{ .Files.Get "files/snow-mock/static/app.js" | indent 4 }}
   styles.css: |
 {{ .Files.Get "files/snow-mock/static/styles.css" | indent 4 }}
-  # Vendored chart.js (4.4.9 UMD) instead of the CDN <script>: the UI then
-  # needs no internet egress and no third party can change code running on
-  # the UI's origin with the user's Basic credentials.
-  chart.umd.min.js: |
-{{ .Files.Get "files/snow-mock/static/chart.umd.min.js" | indent 4 }}
 binaryData:
   snow.png: {{ .Files.Get "files/snow-mock/static/snow.png" | b64enc | quote }}
