@@ -38,6 +38,24 @@ gitops:
 argocd:
   namespace: openshift-gitops
   project: default
+  # Raise the application-controller's memory BEFORE any component syncs.
+  # The stock instance ships a 2Gi limit, which this app-of-apps can
+  # OOM-kill during the early waves -- cluster-dl265 (exit 137, caught at
+  # wave 3 by the platform-config Job) and cluster-5b6gt (controller
+  # thrashed from the first hour; its stale health then blocked the
+  # pipelines Application that carries the patch, deadlocking the install
+  # for 23h until the limit was raised by hand). This Job is part of
+  # field-content ITSELF at sync-wave -1, ahead of the wave-0 vault
+  # Application, so the only work the stock controller must survive is
+  # rendering this chart -- a few dozen small manifests. It only ever
+  # raises a limit, so a platform that sets a higher one is left alone.
+  # The pipelines platform-config Job keeps an equivalent patch as a
+  # belt-and-braces net for standalone (non-bootstrap) installs.
+  controllerResources:
+    enabled: true
+    name: openshift-gitops
+    memoryRequest: 2Gi
+    memoryLimit: 8Gi
 
 # Injected by the field-content deployer: the cluster's apps subdomain
 # (e.g. apps.cluster-abcde.example.com, no leading dot). Every hostname the
