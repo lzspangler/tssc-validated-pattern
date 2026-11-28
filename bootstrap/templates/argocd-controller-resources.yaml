@@ -64,19 +64,33 @@ data:
             return r.status, (json.loads(raw) if raw else None)
 
 
-    def mem_mib(v):
-        # "8Gi" / "2048Mi" / bare number (MiB) -> int MiB, or None.
+    def mem_bytes(v):
+        # Kubernetes memory quantity -> bytes (float), or None.
+        # Semantics per the resource API: a BARE number is BYTES (so
+        # "2147483648" is 2Gi, not 2Gi MiB -- misreading it as MiB made
+        # the only-ever-raises check treat a bytes form as astronomically
+        # large and skip a required increase); Ki/Mi/Gi/Ti/Pi/Ei are
+        # binary (1024^n); k/M/G/T/P/E are decimal (1000^n); mantissas
+        # may be fractional ("1.5Gi"). Two-char suffixes are checked
+        # first so "Mi" is not read as M + "i".
         if v is None:
             return None
-        v = str(v).strip()
-        for suffix, mult in (("Gi", 1024), ("Mi", 1), ("G", 1024), ("M", 1), ("Ki", 1 / 1024)):
-            if v.endswith(suffix):
-                try:
-                    return int(float(v[:-len(suffix)]) * mult)
-                except ValueError:
-                    return None
+        s = str(v).strip()
+        if not s:
+            return None
+        binary = {"Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3,
+                  "Ti": 1024 ** 4, "Pi": 1024 ** 5, "Ei": 1024 ** 6}
+        decimal = {"k": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9,
+                   "T": 10 ** 12, "P": 10 ** 15, "E": 10 ** 18}
+        for table in (binary, decimal):
+            for suffix, mult in table.items():
+                if s.endswith(suffix):
+                    try:
+                        return float(s[:-len(suffix)]) * mult
+                    except ValueError:
+                        return None
         try:
-            return int(float(v))
+            return float(s)  # bare number: bytes
         except ValueError:
             return None
 
@@ -91,7 +105,7 @@ data:
         # No explicit limit: the operator default. Patch unconditionally.
         print("argocd controller memory: <operator default> -> %s" % LIMIT)
     else:
-        cur, tgt = mem_mib(current), mem_mib(LIMIT)
+        cur, tgt = mem_bytes(current), mem_bytes(LIMIT)
         if cur is None or tgt is None:
             sys.exit("ERROR: unparseable memory value (current %r, target %r)" % (current, LIMIT))
         if cur >= tgt:
