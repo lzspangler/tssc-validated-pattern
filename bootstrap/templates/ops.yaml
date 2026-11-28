@@ -23,6 +23,8 @@ spec:
           url: {{ printf "https://server-trusted-profile-analyzer.%s" .Values.deployer.domain | quote }}
         oidc:
           issuerUrl: {{ include "bootstrap.issuer" . | quote }}
+        tls:
+          caConfigMap: {{ .Values.components.rhtpaPrerequisites.caConfigMap | quote }}
         vault:
           kvMount: {{ .Values.vault.kvMount | quote }}
           pathPrefix: {{ .Values.vault.pathPrefix | quote }}

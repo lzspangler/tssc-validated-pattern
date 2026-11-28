@@ -59,8 +59,17 @@ data:
     FILE_COUNT=$(printf '%s' "${ACTIONS}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
     echo "Committing ${FILE_COUNT} files to ${PROJECT_SLUG} on ${BRANCH}"
 
-    # Push as the initial commit via the commits API
-    RESP=$(curl -s --request POST \
+    # Push as the initial commit via the commits API. The body is piped on
+    # stdin: a populated application repo is megabytes of base64, which
+    # exceeds the kernel argv limit when passed as a curl argument
+    # ("Argument list too long") and kills the seeding on fresh installs.
+    # When the chart mounts the cluster ingress CA, verify against it
+    # instead of failing on the router's private certificate.
+    CA_ARGS=()
+    if [ -f /etc/ssc-ca/ca-bundle.crt ]; then
+      CA_ARGS=(--cacert /etc/ssc-ca/ca-bundle.crt)
+    fi
+    RESP=$(printf '%s' "${BODY}" | curl -s --request POST "${CA_ARGS[@]}" \
       "https://${GITLAB_HOST}/api/v4/projects/${PROJECT_SLUG}/repository/commits" \
       --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
       --header "Content-Type: application/json" \

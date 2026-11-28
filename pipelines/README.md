@@ -10,12 +10,13 @@ not a Helm chart.
 
 ```
 pipelines/
-  tasks/       33 Tekton Task definitions — the building blocks
-               (git-clone, maven, buildah, AI agents, RHTPA upload, ...)
-  pipelines/   11 Tekton Pipeline definitions — the workflows that compose
+  tasks/       Tekton Task definitions — the building blocks
+               (git-clone, maven, buildah, AI agents, RHTPA upload,
+               tssc-bump-maven, ...)
+  pipelines/   Tekton Pipeline definitions — the workflows that compose
                the tasks (ci-build-publish, agentic-cve-analysis, ...)
-  triggers/    The issue-comment EventListener — the /remediate and
-               /generate-tests-* slash commands on GitLab issues
+  triggers/    The issue-comment EventListener — /remediate, /remediate-bump,
+               and /generate-tests-* slash commands on GitLab issues
   config/      AI backend configuration (ai-agent-config) and agent-skill
                ConfigMaps — mounted into task pods at runtime
 ```
@@ -50,9 +51,9 @@ subdirectories of this directory:
 
 | Application | Wave | Source path | What it applies |
 |---|---|---|---|
-| `tekton-tasks` | 4 | `pipelines/tasks` | All 33 Task CRDs |
+| `tekton-tasks` | 4 | `pipelines/tasks` | Task definitions |
 | `tekton-config` | 4 | `pipelines/config` | `ai-agent-config` + agent-skill ConfigMaps |
-| `tekton-pipelines` | 5 | `pipelines/pipelines` | All 11 Pipeline CRDs |
+| `tekton-pipelines` | 5 | `pipelines/pipelines` | Pipeline definitions |
 | `tekton-triggers` | 5 | `pipelines/triggers` | The issue-comment EventListener |
 
 Each uses `directory: recurse: false` — Argo reads the directory as a
@@ -74,7 +75,7 @@ one can match:
 | Push to default branch | Pipelines as Code | `.tekton/push-ci.yaml` committed in the app repo + Repository CR |
 | Merge request (opened) | — nothing runs | Merge-gating is off; remediation MRs merge without a verify pipeline |
 | MR comment (`/generate-tests-unit`) | Pipelines as Code | `.tekton/generate-tests-comment.yaml` committed in the app repo |
-| **Issue comment** (`/remediate`, `/generate-tests-*`) | **agentic-issue-commands EventListener** | `pipelines/triggers/` + Note Hook webhook |
+| **Issue comment** (`/remediate`, `/remediate-bump`, `/generate-tests-*`) | **agentic-issue-commands EventListener** | `pipelines/triggers/` + Note Hook webhook |
 
 The split exists because PaC only understands push, MR and MR-comment
 webhooks — it never matches a comment on an *issue*, and the issue-comment
@@ -84,8 +85,22 @@ test generation. The GitLab seeding job
 on each application repository: the PaC webhook against the PaC controller
 Route, and a Note Hook against the EventListener's Route, each with its
 own shared-secret token (`gitlab-pac-webhook` / `gitlab-webhook-secret`).
-The EventListener's cel filters drop everything that is not an issue
-comment starting with a command, so the two consumers never overlap.
+The EventListener's CEL filters select issue comments that start with a
+supported command.
+
+### Remediation commands
+
+Each command has its own trigger and Pipeline. Both read the CVE decision
+from the issue. Put optional YAML or JSON decision overrides after the command.
+
+| Issue comment | Pipeline | Remediation Task |
+|---|---|---|
+| `/remediate` | `agentic-cve-remediation` | `ai-remediate-dependency` |
+| `/remediate-bump` | `cve-remediation-bump` | `tssc-bump-maven` |
+
+Use `/remediate-bump` when the version is declared in the Maven project. The
+Pipeline builds the updated project with `mvn package` and opens a PR or MR
+when the build succeeds and there are POM changes to submit.
 
 ## Alternative layouts (and why they were not chosen)
 
